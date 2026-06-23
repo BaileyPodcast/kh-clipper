@@ -37,7 +37,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install Modal
-        run: pip install modal
+        # fastapi is imported at the top of worker/app.py, and `modal deploy` imports
+        # the module locally to build the app graph — so it must be present here too
+        # (the image's pip_install only covers the remote container, not this runner).
+        run: pip install modal "fastapi[standard]"
 
       - name: Deploy worker
         env:
