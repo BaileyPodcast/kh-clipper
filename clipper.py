@@ -79,7 +79,7 @@ def _transcribe(url, provider, output_root="output"):
 def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
         series=None, end_screen=True, source_file=None, episode_id=None,
-        progress_cb=None, output_root="output"):
+        progress_cb=None, output_root="output", reframe_mode="speaker"):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -163,7 +163,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
         cut_file = os.path.join(os.path.dirname(cpath) or ".", c["file"])
         vertical = os.path.join(final_dir, f"{c['clip_id']}_v.mp4")
         try:
-            framing = reframe.reframe(cut_file, vertical, guest=result.get("guest_speaker"))
+            framing = reframe.reframe(cut_file, vertical,
+                                      guest=result.get("guest_speaker"), mode=reframe_mode)
             c["framing"] = framing                    # carry into REVIEW.md
             words = caption.clip_words(words_all, c["start"], c["end"])
             outs = caption.finish(vertical, words, os.path.join(final_dir, c["clip_id"]),

@@ -14,6 +14,8 @@ create table if not exists public.shorts_jobs (
   series      text,                               -- slug matching assets/artwork/<series>.png
   clip_count  int  not null default 5,
   audiogram   boolean not null default true,
+  reframe     text not null default 'speaker'  -- 'speaker' follows the active speaker; 'center' centre-crops
+              check (reframe in ('speaker','center')),
   status      text not null default 'queued'
               check (status in ('queued','running','done','error')),
   stage       text,

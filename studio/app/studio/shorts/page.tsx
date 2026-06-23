@@ -44,6 +44,7 @@ export default function ShortsPage() {
   const [series, setSeries] = useState("golden-threads");
   const [count, setCount] = useState(5);
   const [audiogram, setAudiogram] = useState(true);
+  const [reframe, setReframe] = useState("speaker");  // "speaker" follows the speaker; "center" centre-crops
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -65,7 +66,7 @@ export default function ShortsPage() {
     try {
       const res = await fetch("/api/shorts/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, series, count, audiogram }),
+        body: JSON.stringify({ url, series, count, audiogram, reframe }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "failed");
@@ -97,6 +98,11 @@ export default function ShortsPage() {
             <input type="checkbox" checked={audiogram}
                    onChange={(e) => setAudiogram(e.target.checked)} /> Audiograms
           </label>
+          <select className="rounded border px-3 py-2" value={reframe}
+                  onChange={(e) => setReframe(e.target.value)}>
+            <option value="speaker">Follow speaker</option>
+            <option value="center">Centre crop</option>
+          </select>
           <button onClick={generate} disabled={busy || !url}
                   className="ml-auto rounded bg-black px-4 py-2 text-white disabled:opacity-50">
             {busy ? "Starting…" : "Generate Shorts"}
