@@ -1,0 +1,277 @@
+"""
+KH Clipper — turn a long-form episode into finished, branded vertical clips.
+
+ONE command, end to end:
+    python clipper.py "https://youtube.com/watch?v=..."
+
+Resume / offline options:
+    python clipper.py --transcript output/<id>.transcript.json        # skip fetch+transcribe
+    python clipper.py "URL" --source input/<id>.mp4                    # cut from a local file
+    python clipper.py --transcript <t.json> --source <video.mp4>       # fully local, no download
+    python clipper.py "URL" --no-llm                                   # heuristic detect only
+    python clipper.py "URL" --safe-only --max-sec 30                   # skip review clips, 30s cap
+
+Pipeline (each stage in src/):
+    0 fetch      yt-dlp pulls audio-only
+    1 transcribe Grok STT (default) / WhisperX fallback
+    2 detect     find Kintsugi moments (trauma-informed + safety gate)
+    3 cut        pull only the chosen 1080p sections, frame-accurate, <=35s cap
+    4 reframe    16:9 -> 9:16
+    5 caption    Olive Pill karaoke + gentle CTAs + logo, dual export
+
+Output: output/final/<clip_id>_shorts.mp4  and  _universal.mp4
+"""
+import argparse
+import json
+import os
+
+from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
+                 review, audiogram, endscreen)
+
+
+def _transcribe_local(source_path, provider, episode_id=None, output_root="output"):
+    print(f"[0/5] Using local master: {source_path}")
+    meta = fetch.fetch_local(source_path, episode_id=episode_id)
+    print(f"      {meta['title']}  ({meta['duration_sec'] // 60}m {meta['duration_sec'] % 60}s)")
+    print(f"[1/5] Transcribing via {provider}")
+    try:
+        result = transcribe.transcribe(meta["audio_path"], provider=provider)
+    except Exception as e:
+        try:
+            import whisperx  # noqa: F401
+        except ImportError:
+            raise e          # no local fallback in the cloud — surface the real error
+        if provider == "grok":
+            print(f"      ! {e}. Falling back to local WhisperX...")
+            result = transcribe.transcribe(meta["audio_path"], provider="whisperx")
+        else:
+            raise
+    path = os.path.join(output_root, f"{meta['id']}.transcript.json")
+    json.dump({**meta, **result}, open(path, "w"), indent=2)
+    print(f"      transcript -> {path} ({len(result['words'])} words)")
+    return path
+
+
+def _transcribe(url, provider, output_root="output"):
+    print(f"[0/5] Fetching audio: {url}")
+    meta = fetch.fetch_audio(url)
+    m, s = meta["duration_sec"] // 60, meta["duration_sec"] % 60
+    print(f"      {meta['title']}  ({m}m {s}s)")
+    print(f"[1/5] Transcribing via {provider}")
+    try:
+        result = transcribe.transcribe(meta["audio_path"], provider=provider)
+    except Exception as e:
+        try:
+            import whisperx  # noqa: F401
+        except ImportError:
+            raise e          # no local fallback in the cloud — surface the real error
+        if provider == "grok":
+            print(f"      ! {e}. Falling back to local WhisperX...")
+            result = transcribe.transcribe(meta["audio_path"], provider="whisperx")
+        else:
+            raise
+    path = os.path.join(output_root, f"{meta['id']}.transcript.json")
+    json.dump({**meta, **result}, open(path, "w"), indent=2)
+    print(f"      transcript -> {path} ({len(result['words'])} words)")
+    return path
+
+
+def run(url=None, provider="grok", transcript=None, source=None,
+        use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
+        series=None, end_screen=True, source_file=None, episode_id=None,
+        progress_cb=None, output_root="output"):
+    """Run the pipeline. Returns a structured result dict (see the Studio integration
+    spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
+    `output_root` roots all written files (use a temp dir from a worker)."""
+    def _p(stage, pct, msg=""):
+        if progress_cb:
+            try:
+                progress_cb(stage, pct, msg)
+            except Exception:
+                pass
+
+    os.makedirs(os.path.join(output_root, "final"), exist_ok=True)
+
+    # Stages 0-1. A local master (e.g. downloaded from Google Drive) skips YouTube
+    # entirely: transcribe from the file and cut from it locally.
+    _p("fetch", 0, "fetching + transcribing")
+    if source_file:
+        tpath = transcript or _transcribe_local(source_file, provider, episode_id, output_root)
+        source = source or source_file        # cut locally from the master
+    else:
+        tpath = transcript or _transcribe(url, provider, output_root)
+    tdata = json.load(open(tpath))
+
+    # Stage 2 — detect
+    _p("detect", 35, "finding Kintsugi moments")
+    print(f"[2/5] Detecting Kintsugi moments (top {count})"
+          + ("" if use_llm else " (heuristic only)"))
+    result = detect.detect(tpath, use_llm=use_llm, top_n=count)
+    cpath = tpath.replace(".transcript.json", ".clips.json")
+    json.dump(result, open(cpath, "w"), indent=2)
+    n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
+    print(f"      {len(result['clips'])} moments ({n_ok} ok, "
+          f"{len(result['clips']) - n_ok} flagged for review)  -> {cpath}")
+    # Never pad with weak/unsafe clips — if fewer than asked survived, say so.
+    if len(result["clips"]) < count:
+        print(f"      note: only {len(result['clips'])} clean moment(s) cleared the "
+              f"gate (asked for {count}). Shipping what's clean, not padding.")
+
+    # Stage 2.7 — per-clip metadata pack (title/description/hashtags/pinned/banner).
+    # Non-fatal: if Grok or the key is unavailable, the videos still cut and the
+    # producer fills metadata by hand.
+    if use_llm and result["clips"]:
+        _p("metadata", 50, "writing metadata packs")
+        try:
+            ep_url = f"https://www.youtube.com/watch?v={tdata.get('id')}"
+            metadata.generate(result["clips"],
+                              result.get("title") or tdata.get("title", ""), ep_url)
+            json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
+            n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
+            print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
+        except Exception as e:
+            print(f"      ! metadata pack skipped: {str(e)[:160]}")
+            print("        (videos still cut; fill title/description by hand)")
+
+    # Stage 3 — cut
+    _p("cut", 60, "cutting clips")
+    print("[3/5] Cutting clips")
+    manifest = cut.run(cpath, source=source, safe_only=safe_only, max_sec=max_sec)
+    cuts = json.load(open(manifest))["cuts"]
+    if not cuts:
+        print("      no clips cut (check source/network). Stopping.")
+        _p("done", 100, "no clips cut")
+        return {"episode_id": tdata.get("id"), "title": result.get("title"),
+                "series": series, "clips": [], "review_md_path": None}
+    words_all = tdata["words"]
+
+    # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
+    ep_id = tdata.get("id") or result.get("source") or "episode"
+    final_dir = os.path.join(output_root, "final", ep_id)
+    os.makedirs(final_dir, exist_ok=True)
+    # Map clip_id -> on-screen hook banner (from the metadata pack).
+    banner_by_id = {c.get("clip_id"): (c.get("metadata") or {}).get("banner_hook")
+                    for c in result["clips"]}
+
+    # Stages 4-5 — reframe + caption/CTA/logo per clip
+    _p("render", 70, "reframing + captioning + branding")
+    print("[4/5+5/5] Reframing + captioning + branding")
+    finals = []
+    for i, c in enumerate(cuts):
+        _p("render", 70 + int(25 * i / max(1, len(cuts))),
+           f"clip {i + 1}/{len(cuts)}")
+        cut_file = os.path.join(os.path.dirname(cpath) or ".", c["file"])
+        vertical = os.path.join(final_dir, f"{c['clip_id']}_v.mp4")
+        try:
+            framing = reframe.reframe(cut_file, vertical, guest=result.get("guest_speaker"))
+            c["framing"] = framing                    # carry into REVIEW.md
+            words = caption.clip_words(words_all, c["start"], c["end"])
+            outs = caption.finish(vertical, words, os.path.join(final_dir, c["clip_id"]),
+                                  banner=banner_by_id.get(c["clip_id"]))
+            # Branded end screen: dissolve each finished Short into the outro,
+            # alternating the two options across clips (clip i -> option i%2).
+            if end_screen and endscreen.available():
+                opt = None
+                for f in outs:
+                    opt = endscreen.append_to(f, i)
+                c["end_screen"] = opt
+            finals.extend(outs)
+            # Opt-in branded audiograms (square + vertical) from the clip's audio.
+            if make_audiogram:
+                a_outs = audiogram.render(cut_file, words,
+                                          os.path.join(final_dir, c["clip_id"]),
+                                          series=series)
+                finals.extend(a_outs)
+        except Exception as e:
+            print(f"      ! {c['clip_id']} failed: {str(e)[:160]}")
+        finally:
+            try:                       # tidy the intermediate; never fatal
+                if os.path.exists(vertical):
+                    os.remove(vertical)
+            except OSError:
+                pass
+
+    # Stage 6 — producer gate sheet. Carry framing flags back onto the picks too.
+    framing_by_id = {c["clip_id"]: c.get("framing") for c in cuts}
+    for clip in result["clips"]:
+        if clip.get("clip_id") in framing_by_id:
+            clip["framing"] = framing_by_id[clip["clip_id"]]
+    json.dump(result, open(cpath, "w"), indent=2)        # clips.json now complete
+    review_path = review.write_review(final_dir, result, cuts)
+
+    print(f"\nDONE — {len(finals)} files in {final_dir}/")
+    flagged = [c["clip_id"] for c in cuts
+               if c.get("safety", "ok") != "ok" or (c.get("framing") and c["framing"] != "ok")]
+    if flagged:
+        print(f"Producer review before publishing: {', '.join(flagged)}")
+    print(f"Review gate sheet -> {review_path}")
+    print("Each clip has a _shorts (arrows) and _universal (Reels/TikTok) version.")
+    _p("done", 100, f"{len(finals)} files")
+
+    # Structured result (the contract the Studio worker uploads + displays).
+    cut_by_id = {c["clip_id"]: c for c in cuts}
+    clips_out = []
+    for clip in result["clips"]:
+        cid = clip.get("clip_id")
+        base = os.path.join(final_dir, cid)
+        candidates = {
+            "shorts": f"{base}_shorts.mp4",
+            "universal": f"{base}_universal.mp4",
+            "audiogram_square": f"{base}_audiogram_square.mp4",
+            "audiogram_vertical": f"{base}_audiogram_vertical.mp4",
+        }
+        files = {k: v for k, v in candidates.items() if os.path.exists(v)}
+        cut_for = cut_by_id.get(cid, {})
+        clips_out.append({
+            "clip_id": cid,
+            "start": cut_for.get("start", clip.get("start")),
+            "end": cut_for.get("end", clip.get("end")),
+            "length_sec": cut_for.get("duration", clip.get("length_sec")),
+            "archetype": clip.get("archetype"),
+            "hook_line": clip.get("hook_line"),
+            "why": clip.get("why", ""),
+            "hook_formula": clip.get("hook_formula", "none"),
+            "loopable": clip.get("loopable", False),
+            "safety": clip.get("safety", "ok"),
+            "safety_note": clip.get("safety_note", ""),
+            "framing": clip.get("framing", "ok"),
+            "metadata": clip.get("metadata", {}),
+            "files": files,
+        })
+    return {
+        "episode_id": ep_id,
+        "title": result.get("title"),
+        "series": series,
+        "clips": clips_out,
+        "review_md_path": review_path,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Turn an episode into finished KH clips.")
+    ap.add_argument("url", nargs="?", help="YouTube URL (omit if using --transcript)")
+    ap.add_argument("--provider", default="grok", choices=["grok", "whisperx"])
+    ap.add_argument("--transcript", default=None, help="existing transcript.json (skip 0-1)")
+    ap.add_argument("--source", default=None, help="local source video (skip download in cut)")
+    ap.add_argument("--no-llm", action="store_true", help="heuristic detect only (no Grok)")
+    ap.add_argument("--safe-only", action="store_true", help="skip clips flagged 'review'")
+    ap.add_argument("--max-sec", type=float, default=35.0, help="hard max clip length (default 35)")
+    ap.add_argument("--count", type=int, default=5, help="finished Shorts per episode (default 5)")
+    ap.add_argument("--audiogram", action="store_true",
+                    help="also render branded audiograms (square + vertical) per clip")
+    ap.add_argument("--series", default=None,
+                    help="series name for audiogram artwork -> assets/artwork/<series>.png")
+    ap.add_argument("--no-endscreen", action="store_true",
+                    help="skip the branded end screen on each clip")
+    args = ap.parse_args()
+    if not args.url and not args.transcript:
+        ap.error("give a YouTube URL or --transcript")
+    run(url=args.url, provider=args.provider, transcript=args.transcript,
+        source=args.source, use_llm=not args.no_llm,
+        max_sec=args.max_sec, safe_only=args.safe_only, count=args.count,
+        make_audiogram=args.audiogram, series=args.series,
+        end_screen=not args.no_endscreen)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Media — never commit raw episodes or clips
+input/*
+output/*
+!input/.gitkeep
+!output/.gitkeep
+*.mp4
+*.mov
+
+# macOS
+.DS_Store
+**/.DS_Store

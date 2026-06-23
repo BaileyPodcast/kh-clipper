@@ -1,0 +1,16 @@
+# Stage 0 — pull audio/video from YouTube
+yt-dlp
+
+# Stage 1 — transcription
+requests          # Grok STT API calls
+whisperx          # local fallback provider (Python <3.13 only; Grok STT otherwise)
+
+# Stages 3-5 — cutting, reframing, captioning
+# (ffmpeg itself must be installed separately:  Mac: brew install ffmpeg)
+ffmpeg-python
+
+# Stage 4 — hero-focus speaker-follow reframing
+# MediaPipe BlazeFace (Tasks API) finds the guest's face so the 9:16 crop follows
+# them and crops the host out. Brings opencv-contrib + numpy. Model lives at
+# assets/models/blaze_face_short_range.tflite (download once; see src/face.py header).
+mediapipe
