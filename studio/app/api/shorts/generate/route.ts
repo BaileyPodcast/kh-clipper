@@ -36,6 +36,8 @@ export async function POST(req: NextRequest) {
   const series: string | null = body.series || null;
   const clip_count: number = Math.min(Math.max(parseInt(body.count ?? 5, 10) || 5, 1), 10);
   const audiogram: boolean = body.audiogram !== false;
+  // Framing: "speaker" follows the active speaker (the default), "center" centre-crops.
+  const reframe: string = body.reframe === "center" ? "center" : "speaker";
 
   if (!youtubeId(url)) {
     return NextResponse.json({ error: "Enter a valid YouTube URL" }, { status: 400 });
@@ -47,7 +49,7 @@ export async function POST(req: NextRequest) {
   // 1) Create the job row (RLS check_write_section('studio') applies here).
   const { data: job, error } = await supabase
     .from("shorts_jobs")
-    .insert({ url, series, clip_count, audiogram, status: "queued", progress: 0 })
+    .insert({ url, series, clip_count, audiogram, reframe, status: "queued", progress: 0 })
     .select("id")
     .single();
   if (error || !job) {
@@ -64,7 +66,7 @@ export async function POST(req: NextRequest) {
         Authorization: `Bearer ${process.env.KH_SHORTS_WORKER_TOKEN!}`,
       },
       body: JSON.stringify({
-        job_id: job.id, url, series, count: clip_count, audiogram,
+        job_id: job.id, url, series, count: clip_count, audiogram, reframe,
       }),
     });
     if (!res.ok) throw new Error(`worker ${res.status}`);

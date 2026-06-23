@@ -65,9 +65,11 @@ def _sample_frames(clip_path, out_dir):
 
 def analyze(clip_path):
     """Return a framing decision dict:
-        {width, height, n_frames, multi_ratio, guest_cx, mode}
+        {width, height, n_frames, multi_ratio, guest_cx, mode, track}
     where mode is 'single' | 'follow' | 'ambiguous', and guest_cx is the horizontal
-    pixel centre to crop around (None if we should centre-crop).
+    pixel centre to crop around (None if we should centre-crop). `track` is a list of
+    (t_seconds, cx) samples of the followed face over the clip so reframe can pan with
+    the speaker instead of locking a single static window (None when we centre-crop).
     Raises if detection cannot run at all (caller falls back to centre-crop + review)."""
     import mediapipe as mp
     detector = _get_detector()
@@ -113,7 +115,15 @@ def analyze(clip_path):
     else:
         mode = "single"                 # mostly one face — re-centre on the guest
 
+    # Per-frame horizontal track of the face we follow (largest face each frame), so
+    # reframe can pan with the speaker. Frame i was sampled at i/SAMPLE_FPS seconds.
+    # Only meaningful when we actually follow a face; ambiguous clips centre-crop.
+    track = None
+    if mode in ("single", "follow"):
+        track = [(i / SAMPLE_FPS, f[0][0]) for i, f in enumerate(per_frame) if f]
+
     return {
         "width": width, "height": height, "n_frames": n,
         "multi_ratio": round(multi_ratio, 2), "guest_cx": guest_cx, "mode": mode,
+        "track": track,
     }

@@ -144,7 +144,7 @@ def upload_outputs(job_id, result):
 # ----------------------------------------------------------------------
 @app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
 def process_job(job_id: str, url: str, series: str = None,
-                count: int = 5, audiogram: bool = True):
+                count: int = 5, audiogram: bool = True, reframe: str = "speaker"):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -183,11 +183,12 @@ def process_job(job_id: str, url: str, series: str = None,
             result = clipper.run(
                 source_file=src, episode_id=file_id, series=series, count=count,
                 make_audiogram=audiogram, progress_cb=progress, output_root="/tmp/job",
+                reframe_mode=reframe,
             )
         else:
             result = clipper.run(
                 url=url, series=series, count=count, make_audiogram=audiogram,
-                progress_cb=progress, output_root="/tmp/job",
+                progress_cb=progress, output_root="/tmp/job", reframe_mode=reframe,
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
         outputs = upload_outputs(job_id, result)
@@ -215,5 +216,8 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
     process_job.spawn(
         payload["job_id"], payload["url"], payload.get("series"),
         int(payload.get("count", 5)), bool(payload.get("audiogram", True)),
+        # Honour the Shorts Engine's reframe request ("speaker" = follow the speaker).
+        # Default to speaker-follow so older callers keep tracked framing.
+        str(payload.get("reframe") or "speaker"),
     )
     return {"accepted": True, "job_id": payload["job_id"]}
