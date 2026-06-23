@@ -1,0 +1,46 @@
+name: Deploy worker to Modal
+
+# Redeploys the kh-shorts-worker Modal app whenever the worker or the pipeline code
+# it bundles changes on main. Also runnable on demand from the Actions tab
+# (workflow_dispatch) — use that to deploy the first time after adding the secrets.
+#
+# Requires two repo secrets (Settings -> Secrets and variables -> Actions):
+#   MODAL_TOKEN_ID      from Modal -> Settings -> API Tokens -> New Token (ak-...)
+#   MODAL_TOKEN_SECRET  the matching secret half (as-...)
+# Modal reads those env vars automatically, so the deploy is non-interactive.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "clipper.py"
+      - "src/**"
+      - "assets/**"
+      - "requirements.txt"
+      - ".github/workflows/deploy-modal.yml"
+  workflow_dispatch:
+
+# Never let two deploys race; let an in-flight one finish rather than cancelling it.
+concurrency:
+  group: modal-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Modal
+        run: pip install modal
+
+      - name: Deploy worker
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: python -m modal deploy worker/app.py
