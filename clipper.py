@@ -79,7 +79,8 @@ def _transcribe(url, provider, output_root="output"):
 def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
         series=None, end_screen=True, source_file=None, episode_id=None,
-        progress_cb=None, output_root="output", reframe_mode="speaker"):
+        progress_cb=None, output_root="output", reframe_mode="speaker",
+        guest_name=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -125,7 +126,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
         try:
             ep_url = f"https://www.youtube.com/watch?v={tdata.get('id')}"
             metadata.generate(result["clips"],
-                              result.get("title") or tdata.get("title", ""), ep_url)
+                              result.get("title") or tdata.get("title", ""), ep_url,
+                              guest_name=guest_name)
             json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
             n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
             print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
@@ -142,7 +144,9 @@ def run(url=None, provider="grok", transcript=None, source=None,
         print("      no clips cut (check source/network). Stopping.")
         _p("done", 100, "no clips cut")
         return {"episode_id": tdata.get("id"), "title": result.get("title"),
-                "series": series, "clips": [], "review_md_path": None}
+                "series": series, "guest_name": guest_name, "clips": [],
+                "review_md_path": None, "transcript_path": tpath,
+                "candidate_pool": result.get("candidate_pool", [])}
     words_all = tdata["words"]
 
     # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
@@ -243,8 +247,96 @@ def run(url=None, provider="grok", transcript=None, source=None,
         "episode_id": ep_id,
         "title": result.get("title"),
         "series": series,
+        "guest_name": guest_name,
         "clips": clips_out,
         "review_md_path": review_path,
+        "transcript_path": tpath,            # worker persists this for per-clip ops
+        "candidate_pool": result.get("candidate_pool", []),
+    }
+
+
+def render_clip(spec, url=None, source=None, words_all=None, series=None,
+                guest_name=None, reframe_mode="speaker", make_audiogram=True,
+                end_screen=True, index=0, output_root="output",
+                with_metadata=False, episode_title="", episode_url=""):
+    """Cut + reframe + caption + brand ONE moment, returning a clip dict in the same
+    shape as run()'s `clips[]` entries (clip_id, start, end, files, framing, ...).
+
+    The per-clip "reframe"/"replace" buttons use this: same renderers as the full job,
+    just one moment. `spec` needs clip_id + start + end (and ideally hook_line/archetype/
+    text/safety). `with_metadata=True` writes a fresh metadata pack (the "replace" path);
+    reframe passes the existing pack in `spec["metadata"]` so captions/banner stay stable.
+    Reframe-only re-cuts the SAME start/end with a new crop mode; the caller swaps files."""
+    os.makedirs(os.path.join(output_root, "clips"), exist_ok=True)
+    final_dir = os.path.join(output_root, "final", "clip")
+    os.makedirs(final_dir, exist_ok=True)
+
+    cid = spec["clip_id"]
+    start, end = float(spec["start"]), float(spec["end"])
+    # Same hard ceiling as the full pipeline (trim the END, keep the hook).
+    if end - start > cut.MAX_CLIP_SEC:
+        end = start + cut.MAX_CLIP_SEC
+
+    cut_file = os.path.join(output_root, "clips", f"{cid}.mp4")
+    if source:
+        cut.cut_local(source, start, end, cut_file)
+    else:
+        cut.cut_remote(url, start, end, cut_file)
+
+    meta = dict(spec.get("metadata") or {})
+    if with_metadata:
+        try:
+            one = [{"hook_line": spec.get("hook_line", ""),
+                    "archetype": spec.get("archetype", ""),
+                    "why": spec.get("why", ""), "text": spec.get("text", ""),
+                    "safety": spec.get("safety", "ok")}]
+            metadata.generate(one, episode_title, episode_url, guest_name=guest_name)
+            meta = one[0].get("metadata", meta)
+        except Exception as e:
+            print(f"      ! metadata pack skipped: {str(e)[:160]}")
+    banner = meta.get("banner_hook")
+
+    vertical = os.path.join(final_dir, f"{cid}_v.mp4")
+    framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode)
+    words = caption.clip_words(words_all or [], start, end)
+    outs = caption.finish(vertical, words, os.path.join(final_dir, cid), banner=banner)
+    if end_screen and endscreen.available():
+        for f in outs:
+            endscreen.append_to(f, index)
+    if make_audiogram:
+        try:
+            audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series)
+        except Exception as e:
+            print(f"      ! audiogram skipped: {str(e)[:160]}")
+    for p in (cut_file, vertical):                 # tidy intermediates
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+    files = {}
+    for kind, suffix in (("shorts", "_shorts.mp4"), ("universal", "_universal.mp4"),
+                         ("audiogram_square", "_audiogram_square.mp4"),
+                         ("audiogram_vertical", "_audiogram_vertical.mp4")):
+        p = os.path.join(final_dir, f"{cid}{suffix}")
+        if os.path.exists(p):
+            files[kind] = p
+    return {
+        "clip_id": cid,
+        "start": round(start, 2),
+        "end": round(end, 2),
+        "length_sec": round(end - start, 1),
+        "archetype": spec.get("archetype"),
+        "hook_line": spec.get("hook_line"),
+        "why": spec.get("why", ""),
+        "hook_formula": spec.get("hook_formula", "none"),
+        "loopable": spec.get("loopable", False),
+        "safety": spec.get("safety", "ok"),
+        "safety_note": spec.get("safety_note", ""),
+        "framing": framing,
+        "metadata": meta,
+        "files": files,
     }
 
 

@@ -543,6 +543,15 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N):
         clip["source_video_id"] = data.get("id")
         clip.pop("index", None)
 
+    # Candidate pool for the per-clip "replace" action: the deduped, ranked moments
+    # BEYOND the shipped top_n. Persisted by the worker so a later "replace" can pick a
+    # genuinely different unused moment without re-fetching/re-transcribing. Light fields
+    # only (enough to cut + caption + write a fresh metadata pack).
+    POOL_FIELDS = ("start", "end", "length_sec", "archetype", "hook_line",
+                   "highlight_word", "fit_score", "lead_with", "safety",
+                   "safety_note", "text")
+    candidate_pool = [{k: c.get(k) for k in POOL_FIELDS} for c in heuristic_ranked[:40]]
+
     return {
         "source": data.get("id"),
         "title": data.get("title"),
@@ -554,6 +563,7 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N):
         "n_passed_gate": len(scored),
         "n_requested": top_n,
         "clips": top,
+        "candidate_pool": candidate_pool,
     }
 
 
