@@ -71,9 +71,13 @@ def _clip_block(i, clip):
 
 
 def generate(clips, episode_title, episode_url, handle=None,
-             model=GROK_MODEL, api_key=None):
+             model=GROK_MODEL, api_key=None, guest_name=None):
     """Attach a `metadata` dict to each clip (in place) and return the clips.
-    Raises on any failure so the caller can fall back to no-metadata."""
+    Raises on any failure so the caller can fall back to no-metadata.
+
+    `guest_name` (when known) is the real guest's name; Grok uses it naturally in
+    titles/descriptions/pinned comments instead of saying "our guest". When None we
+    fall back to today's generic wording."""
     api_key = api_key or os.environ.get("XAI_API_KEY")
     if not api_key:
         raise RuntimeError("XAI_API_KEY not set — cannot generate the metadata pack.")
@@ -81,9 +85,17 @@ def generate(clips, episode_title, episode_url, handle=None,
         return clips
     handle = handle or brand.CTA["copy"]["handle"]
 
+    guest_line = (
+        f'The guest\'s name is "{guest_name}". Use it naturally where you would otherwise '
+        f'say "our guest" or "this guest" (titles, descriptions, pinned comments); still '
+        f'lead with the person, never the diagnosis or the tragedy.\n'
+        if guest_name else
+        "The guest's name is not provided — use warm, generic wording (no invented name).\n"
+    )
     blocks = "\n\n".join(_clip_block(i, c) for i, c in enumerate(clips))
     user_prompt = (
         f'Episode: "{episode_title}"\n'
+        f"{guest_line}"
         f"Full-episode link to use in every description: {episode_url}\n"
         f"Handle to use: {handle}\n\n"
         f"Here are the {len(clips)} clips, each with an [index]:\n\n{blocks}\n\n"
