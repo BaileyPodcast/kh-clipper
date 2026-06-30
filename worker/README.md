@@ -98,8 +98,13 @@ re-fetch, no re-transcribe.
 per-clip ops (best-effort — the full job still succeeds if they fail to persist).
 
 ## Notes
-- Image bundles `clipper.py`, `src/`, and `assets/` (fonts, logo, BlazeFace model,
-  series artwork). `output/` and `venv/` are excluded.
+- Image bundles `clipper.py`, `src/`, and `assets/` (fonts incl. Archivo/IBM Plex Mono,
+  logos incl. the suite colourways in `assets/logo/suite/`, BlazeFace model, series
+  artwork). `output/` and `venv/` are excluded.
+- Audiograms (`audiogram_square`/`audiogram_vertical`) render the approved KH
+  design-suite look per the series palette (`src/audiogram.py`); the on-screen text
+  (caption = the clip's spoken hook line, footer title, `with {guest}`, series eyebrow)
+  is generated per clip from that clip's own metadata, not a fixed placeholder.
 - The trauma-informed gate travels with the code: each clip carries `safety`/`framing`
   flags; Studio must require human approval before any publish/schedule. Never auto-post.
 - Cost: pay-per-second CPU, scales to zero. ~3–8 min CPU/episode ≈ a few cents.

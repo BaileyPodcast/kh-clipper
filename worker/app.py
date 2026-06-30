@@ -40,7 +40,10 @@ image = (
     # them BlazeFace fails to init (libGLESv2.so.2 missing) and every clip silently
     # centre-crops instead of following the speaker (see src/reframe.py fail-soft path).
     .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "libegl1", "libgles2")
-    .pip_install("yt-dlp", "requests", "mediapipe", "ffmpeg-python", "fastapi[standard]", "gdown")
+    # pillow + numpy power the branded audiogram renderer (src/audiogram.py): it draws
+    # each frame of the KH design-suite audiogram and ffmpeg muxes the clip audio under it.
+    .pip_install("yt-dlp", "requests", "mediapipe", "ffmpeg-python", "fastapi[standard]",
+                 "gdown", "pillow", "numpy")
     .add_local_file(os.path.join(REPO_ROOT, "clipper.py"), "/root/clipper.py")
     .add_local_dir(os.path.join(REPO_ROOT, "src"), "/root/src")
     .add_local_dir(os.path.join(REPO_ROOT, "assets"), "/root/assets")

@@ -156,6 +156,11 @@ def run(url=None, provider="grok", transcript=None, source=None,
     # Map clip_id -> on-screen hook banner (from the metadata pack).
     banner_by_id = {c.get("clip_id"): (c.get("metadata") or {}).get("banner_hook")
                     for c in result["clips"]}
+    # Map clip_id -> audiogram footer title + spoken-line caption (from the metadata pack;
+    # the audiogram uses the curated short title and the clip's hook line).
+    title_by_id = {c.get("clip_id"): (c.get("metadata") or {}).get("title")
+                   for c in result["clips"]}
+    hookline_by_id = {c.get("clip_id"): c.get("hook_line") for c in result["clips"]}
 
     # Stages 4-5 — reframe + caption/CTA/logo per clip
     _p("render", 70, "reframing + captioning + branding")
@@ -185,7 +190,10 @@ def run(url=None, provider="grok", transcript=None, source=None,
             if make_audiogram:
                 a_outs = audiogram.render(cut_file, words,
                                           os.path.join(final_dir, c["clip_id"]),
-                                          series=series)
+                                          series=series,
+                                          caption=hookline_by_id.get(c["clip_id"]),
+                                          title=title_by_id.get(c["clip_id"]),
+                                          guest_name=guest_name)
                 finals.extend(a_outs)
         except Exception as e:
             print(f"      ! {c['clip_id']} failed: {str(e)[:160]}")
@@ -305,7 +313,9 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
             endscreen.append_to(f, index)
     if make_audiogram:
         try:
-            audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series)
+            audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series,
+                             caption=spec.get("hook_line"), title=meta.get("title"),
+                             guest_name=guest_name)
         except Exception as e:
             print(f"      ! audiogram skipped: {str(e)[:160]}")
     for p in (cut_file, vertical):                 # tidy intermediates
