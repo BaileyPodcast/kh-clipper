@@ -5,12 +5,16 @@ The Shorts strategy is solo guest, host off-screen. For a centred solo guest a c
 centre-crop is plenty. For a two-person interview a centre-crop can split the frame
 between host and guest, which kills the intimacy. So:
 
-  - We sample faces in the clip (src/face.py, MediaPipe BlazeFace).
+  - We track each face as a persistent subject through the clip (src/face.py,
+    MediaPipe BlazeFace) — not "whichever face is biggest this frame", which in a
+    two-person shot ping-pongs between host and guest and lands the crop in the gap.
   - One subject  -> re-centre the 9:16 crop on the guest (handles off-centre solos too).
-  - One dominant face in a multi-person clip -> follow that face (the guest).
-  - Two comparable faces we can't tell apart, OR face detection unavailable on a
-    diarized interview -> keep the v1 centre-crop and flag the clip `framing: review`
-    so a producer checks it. We never ship a bad crop silently.
+  - Two-plus subjects -> follow the one who is SPEAKING (the face whose mouth moves in
+    time with the audio = the guest), and lock the crop to them so the host stays out.
+  - We can't tell who's speaking (both talk equally, or no lip/audio signal on
+    same-size faces), OR face detection is unavailable on a diarized interview ->
+    keep the centre-crop and flag the clip `framing: review` so a producer checks it.
+    We never ship a bad crop silently, and never pick a subject at random.
 
 `reframe()` keeps its original signature (src, out) plus optional `guest`/`mode`, and
 returns a framing flag string: "ok" or "review".
