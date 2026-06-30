@@ -14,3 +14,10 @@ ffmpeg-python
 # them and crops the host out. Brings opencv-contrib + numpy. Model lives at
 # assets/models/blaze_face_short_range.tflite (download once; see src/face.py header).
 mediapipe
+
+# Stage 5b — branded audiograms (src/audiogram.py)
+# Pillow draws each frame of the KH design-suite audiogram (logo, eyebrow, gold seam
+# waveform, caption, progress, footer); numpy builds the radial highlight + the
+# audio-reactive waveform envelope. numpy also ships with mediapipe.
+pillow
+numpy
