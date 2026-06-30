@@ -41,7 +41,10 @@ POST {KH_SHORTS_WORKER_URL}
 Authorization: Bearer {KH_SHORTS_WORKER_TOKEN}
 { "job_id": "<uuid>", "url": "<youtube>", "series": "golden-threads",
   "guest_name": "Jason Blyth", "count": 5, "audiogram": true,
-  "reframe": "speaker" }
+  "reframe": "speaker",
+  "transcript": { "title": "...", "text": "...", "duration_sec": 1234,
+                  "provider": "assemblyai",
+                  "words": [ {"text":"Welcome","start":5.79,"end":6.05,"speaker":0} ] } }
 ```
 Returns `202 {accepted, job_id}` immediately; the job runs async. Studio watches the
 `shorts_jobs` row via Realtime, then reads `outputs` (storage paths) and serves the
@@ -49,6 +52,13 @@ files via short-lived **signed URLs**.
 
 `guest_name` (may be `null`) is threaded into the clip copy (titles/descriptions/pinned
 comments); `reframe` is `speaker` (follow the speaker) or `center` (centre-crop).
+
+`transcript` is **optional** (Plan B — one transcription). When Studio already holds an
+AssemblyAI transcript for the episode it sends it here so the worker skips its own STT;
+`start`/`end` are seconds and `speaker` is a stable int per voice (or `null`). The worker
+sets the transcript `id` from the source it cuts and sanity-checks the transcript length
+against the media before trusting it (bad fit → it re-transcribes). Omitted when the
+episode has no word-level timing — the worker transcribes the source itself, as before.
 
 ## Per-clip ops — the "reframe" / "replace" buttons
 The same endpoint + token handles per-clip re-renders, distinguished by `action`

@@ -239,9 +239,76 @@ def _write_cookies():
 
 
 @app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+def _youtube_id(url: str) -> str:
+    """The 11-char YouTube id from a watch/short/embed link. The clipper rebuilds
+    the remote cut URL from the transcript's `id`, so a supplied transcript must
+    carry the real video id on the YouTube path."""
+    import re
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})", url or "")
+    return m.group(1) if m else "episode"
+
+
+def _media_duration_local(path: str):
+    """Seconds of a local media file via ffprobe, or None if it can't be read."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=120)
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None):
+    """Plan B: turn kh-studio's supplied transcript (a dict of title/text/words/
+    duration_sec) into a transcript file the clipper uses INSTEAD of its own STT.
+    Returns the written path, or None to fall back to transcribing the source.
+
+    `ep_id` becomes the transcript `id` (the clipper rebuilds the YouTube cut URL
+    from it, so it MUST be the real video id on the YouTube path). When a local
+    media file is on hand (the Drive path), we sanity-check that the transcript's
+    timeline fits the media before trusting it — a wildly different length means a
+    different edit, so we re-transcribe rather than mis-cut. On the YouTube path we
+    trust provenance (Studio only attaches that same episode's own transcript) and
+    rely on the mandatory human clip review as the backstop."""
+    try:
+        if not transcript:
+            return None
+        words = transcript.get("words") or []
+        if not words:
+            return None
+        last_end = max((float(w.get("end", 0) or 0) for w in words), default=0.0)
+        if last_end <= 0:
+            return None
+        if media_path:
+            dur = _media_duration_local(media_path)
+            # Transcript must fit inside the media (small slack), and the media
+            # must not be a wildly different length. Bad fit -> re-transcribe.
+            if dur and not (last_end <= dur * 1.05 and dur <= last_end * 2.0):
+                print(f"[plan-b] transcript/media duration mismatch "
+                      f"(transcript {last_end:.0f}s vs media {dur:.0f}s) — re-transcribing")
+                return None
+        import json as _json
+        t = dict(transcript)
+        t["id"] = ep_id
+        if not t.get("text"):
+            t["text"] = " ".join(str(w.get("text", "")) for w in words)
+        os.makedirs("/tmp/job", exist_ok=True)
+        path = f"/tmp/job/{ep_id}.transcript.json"
+        with open(path, "w") as f:
+            _json.dump(t, f)
+        print(f"[plan-b] using kh-studio transcript ({len(words)} words) — skipping STT")
+        return path
+    except Exception as e:
+        print(f"[plan-b] supplied transcript unusable ({str(e)[:120]}) — re-transcribing")
+        return None
+
+
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
-                guest_name: str = None):
+                guest_name: str = None, transcript: dict = None):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -268,16 +335,18 @@ def process_job(job_id: str, url: str, series: str = None,
             gdown.download(id=file_id, output=src, quiet=True)
             if not os.path.exists(src) or os.path.getsize(src) < 10000:
                 raise RuntimeError("Drive download failed — is the file shared 'anyone with the link'?")
+            tpath = _prepare_supplied_transcript(transcript, file_id, media_path=src)
             result = clipper.run(
                 source_file=src, episode_id=file_id, series=series, count=count,
                 make_audiogram=audiogram, progress_cb=progress, output_root="/tmp/job",
-                reframe_mode=reframe, guest_name=guest_name,
+                reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
             )
         else:
+            tpath = _prepare_supplied_transcript(transcript, _youtube_id(url))
             result = clipper.run(
                 url=url, series=series, count=count, make_audiogram=audiogram,
                 progress_cb=progress, output_root="/tmp/job", reframe_mode=reframe,
-                guest_name=guest_name,
+                guest_name=guest_name, transcript=tpath,
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
         outputs = upload_outputs(job_id, result)
@@ -465,5 +534,9 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         str(payload.get("reframe") or "speaker"),
         # The real guest's name (or None) -> threaded into clip copy.
         payload.get("guest_name"),
+        # Plan B: an optional pre-made transcript (kh-studio's AssemblyAI words)
+        # so the worker can skip re-transcribing. Absent -> we transcribe the
+        # source ourselves, exactly as before.
+        payload.get("transcript"),
     )
     return {"accepted": True, "job_id": payload["job_id"]}
