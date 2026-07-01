@@ -238,7 +238,6 @@ def _write_cookies():
         print("[cookies] no usable YT_COOKIES — yt-dlp will hit the bot wall")
 
 
-@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
 def _youtube_id(url: str) -> str:
     """The 11-char YouTube id from a watch/short/embed link. The clipper rebuilds
     the remote cut URL from the transcript's `id`, so a supplied transcript must
@@ -306,6 +305,7 @@ def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None)
         return None
 
 
+@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
                 guest_name: str = None, transcript: dict = None):
