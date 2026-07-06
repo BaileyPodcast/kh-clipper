@@ -16,9 +16,16 @@ Deploy:
         XAI_API_KEY=xai-... \
         SUPABASE_URL=https://<project>.supabase.co \
         SUPABASE_SERVICE_ROLE_KEY=<service-role-key> \
-        WORKER_TOKEN=<a-long-random-shared-token>
+        WORKER_TOKEN=<a-long-random-shared-token> \
+        GOOGLE_OAUTH_CLIENT_ID=<client-id> \
+        GOOGLE_OAUTH_CLIENT_SECRET=<client-secret>
     modal deploy worker/app.py
     # -> prints the web endpoint URL. Put it + WORKER_TOKEN in Studio's server env.
+
+    GOOGLE_OAUTH_CLIENT_ID / _SECRET are only needed for the Schedule-for-YouTube
+    upload job (action="upload_youtube"): the worker reads the channel refresh token
+    from oauth_tokens (service role) and refreshes its own YouTube access token, so
+    no token is sent in the request. Shorts jobs don't use them.
 
 Storage: a PRIVATE bucket named `shorts`. Studio reads via short-lived signed URLs.
 """
@@ -108,6 +115,61 @@ def get_job(job_id):
     r.raise_for_status()
     rows = r.json()
     return rows[0] if rows else None
+
+
+def patch_upload(upload_id, fields):
+    """PATCH a youtube_uploads row (service role bypasses RLS). Never raises.
+    `updated_at` is handled by the youtube_uploads_set_updated_at DB trigger."""
+    import json as _json
+    import requests
+    try:
+        body = _json.dumps(fields, ensure_ascii=True)
+        r = requests.patch(
+            f"{_sb_url()}/rest/v1/youtube_uploads",
+            headers=_sb_headers({"Content-Type": "application/json",
+                                 "Prefer": "return=minimal"}),
+            params={"id": f"eq.{upload_id}"},
+            data=body, timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"patch_upload {r.status_code}: {r.text[:200]}")
+    except Exception as e:                       # progress is best-effort
+        print(f"patch_upload failed: {e}")
+
+
+def _youtube_token():
+    """Mint a YouTube access token from the stored refresh token: a service-role read
+    of oauth_tokens (provider=youtube, account_label=kh-primary) + a Google refresh.
+    Needs GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET in the kh-shorts secret.
+    Raises with a clear message when the channel isn't connected."""
+    import requests
+    r = requests.get(
+        f"{_sb_url()}/rest/v1/oauth_tokens",
+        headers=_sb_headers(),
+        params={"provider": "eq.youtube", "account_label": "eq.kh-primary",
+                "select": "refresh_token"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    refresh = rows[0].get("refresh_token") if rows else None
+    if not refresh:
+        raise RuntimeError("YouTube isn't connected (no refresh token in oauth_tokens).")
+    tr = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": os.environ["GOOGLE_OAUTH_CLIENT_ID"].strip(),
+            "client_secret": os.environ["GOOGLE_OAUTH_CLIENT_SECRET"].strip(),
+            "refresh_token": refresh,
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+    )
+    tr.raise_for_status()
+    tok = tr.json().get("access_token")
+    if not tok:
+        raise RuntimeError("Google token refresh returned no access_token.")
+    return tok
 
 
 def download_storage(storage_path, local_path):
@@ -500,11 +562,175 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
 # Returns immediately (202); the job runs async via .spawn().
 # (Older Modal: rename `fastapi_endpoint` -> `web_endpoint`.)
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Schedule for YouTube — upload a Drive master to the channel, private +
+# publishAt (never a direct live publish). Mirrors process_job's Drive
+# fetch + patch pattern; streams progress into youtube_uploads (db/167,168).
+# The video is inserted private with publishAt; it goes public at go-live
+# once the project's YouTube API compliance audit is approved.
+# ----------------------------------------------------------------------
+@app.function(image=image, timeout=10800, secrets=[SECRET])
+def process_youtube_upload(payload: dict):
+    import json as _json
+    import re
+    import requests
+
+    upload_id = payload["upload_id"]
+    master_url = payload.get("master_url") or ""
+    snippet = payload.get("snippet") or {}
+    status = dict(payload.get("status") or {})
+    notify = bool(payload.get("notifySubscribers", True))
+    playlist_id = payload.get("playlist_id")
+    thumbnail_url = payload.get("thumbnail_url")
+    captions_srt = payload.get("captions_srt")
+    recording_date = payload.get("recordingDate")
+
+    def prog(stage, pct, msg=""):
+        patch_upload(upload_id, {"state": "uploading", "stage": stage,
+                                 "progress": int(pct), "message": msg})
+
+    src = None
+    try:
+        patch_upload(upload_id, {"state": "uploading", "stage": "queued",
+                                 "progress": 0, "error": None})
+
+        # 1) Fetch the Drive master (same gdown path as the Shorts worker).
+        drive = re.search(r"drive\.google\.com/(?:file/d/|open\?id=|uc\?id=|.*[?&]id=)([A-Za-z0-9_-]{20,})", master_url)
+        if not drive:
+            raise RuntimeError("master_url is not a Google Drive file link.")
+        file_id = drive.group(1)
+        prog("download", 5, "downloading master from Google Drive")
+        import gdown
+        os.makedirs("/tmp/yt", exist_ok=True)
+        src = f"/tmp/yt/{file_id}.mp4"
+        gdown.download(id=file_id, output=src, quiet=True)
+        if not os.path.exists(src) or os.path.getsize(src) < 10000:
+            raise RuntimeError("Drive download failed — is the file shared 'anyone with the link'?")
+
+        # 2) Authorise (worker mints its own token from the stored refresh token).
+        prog("auth", 10, "authorising with YouTube")
+        token = _youtube_token()
+
+        # 3) Resumable videos.insert — private + publishAt.
+        prog("upload", 15, "uploading to YouTube")
+        body = {"snippet": snippet, "status": status}
+        parts = ["snippet", "status"]
+        if recording_date:
+            body["recordingDetails"] = {"recordingDate": f"{recording_date}T00:00:00Z"}
+            parts.append("recordingDetails")
+        init = requests.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "resumable", "part": ",".join(parts),
+                    "notifySubscribers": "true" if notify else "false"},
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json; charset=UTF-8",
+                     "X-Upload-Content-Type": "video/*"},
+            data=_json.dumps(body), timeout=120,
+        )
+        if init.status_code >= 300:
+            raise RuntimeError(f"videos.insert init failed {init.status_code}: {init.text[:300]}")
+        session = init.headers.get("Location")
+        if not session:
+            raise RuntimeError("No resumable session URI returned by YouTube.")
+        patch_upload(upload_id, {"resume_uri": session})
+        size = os.path.getsize(src)
+        # Single streaming PUT (requests streams the file object, never loads it into
+        # memory). The session URI is persisted first, so a future hardening can add
+        # chunked resume on a dropped connection.
+        with open(src, "rb") as f:
+            up = requests.put(
+                session,
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Length": str(size), "Content-Type": "video/*"},
+                data=f, timeout=None,
+            )
+        if up.status_code >= 300:
+            raise RuntimeError(f"upload failed {up.status_code}: {up.text[:300]}")
+        video_id = up.json().get("id")
+        if not video_id:
+            raise RuntimeError("Upload succeeded but YouTube returned no video id.")
+        patch_upload(upload_id, {"state": "processing", "stage": "processing", "progress": 80,
+                                 "video_id": video_id, "quota_units_used": 1600,
+                                 "message": "video uploaded, running side calls"})
+
+        # 4) Best-effort side calls: thumbnail, captions, playlist.
+        upl = "https://www.googleapis.com/upload/youtube/v3"
+        yt = "https://www.googleapis.com/youtube/v3"
+        if thumbnail_url:
+            try:
+                img = requests.get(thumbnail_url, timeout=120)
+                if img.ok:
+                    ct = img.headers.get("Content-Type", "image/png")
+                    tset = requests.post(
+                        f"{upl}/thumbnails/set", params={"videoId": video_id},
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": ct},
+                        data=img.content, timeout=120)
+                    if tset.ok:
+                        patch_upload(upload_id, {"thumbnail_pushed": True})
+                    else:
+                        print(f"thumbnails.set {tset.status_code}: {tset.text[:200]}")
+            except Exception as e:
+                print(f"thumbnail set failed: {e}")
+        if captions_srt:
+            try:
+                meta = {"snippet": {"videoId": video_id,
+                                    "language": snippet.get("defaultAudioLanguage") or "en",
+                                    "name": "English", "isDraft": False}}
+                cap = requests.post(
+                    f"{upl}/captions", params={"part": "snippet"},
+                    headers={"Authorization": f"Bearer {token}"},
+                    files={"metadata": ("meta.json", _json.dumps(meta), "application/json"),
+                           "file": ("captions.srt", captions_srt.encode("utf-8"), "application/octet-stream")},
+                    timeout=120)
+                if cap.ok:
+                    patch_upload(upload_id, {"captions_pushed": True})
+                else:
+                    print(f"captions.insert {cap.status_code}: {cap.text[:200]}")
+            except Exception as e:
+                print(f"captions insert failed: {e}")
+        if playlist_id:
+            try:
+                pl = requests.post(
+                    f"{yt}/playlistItems", params={"part": "snippet"},
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    data=_json.dumps({"snippet": {"playlistId": playlist_id,
+                                                  "resourceId": {"kind": "youtube#video", "videoId": video_id}}}),
+                    timeout=60)
+                if pl.ok:
+                    patch_upload(upload_id, {"playlist_pushed": True})
+                else:
+                    print(f"playlistItems.insert {pl.status_code}: {pl.text[:200]}")
+            except Exception as e:
+                print(f"playlist add failed: {e}")
+
+        # 5) Done: uploaded private + scheduled. Goes public at publishAt once audited.
+        patch_upload(upload_id, {"state": "scheduled", "stage": "scheduled", "progress": 100,
+                                 "message": "Uploaded private and scheduled for go-live."})
+    except Exception as e:
+        patch_upload(upload_id, {"state": "failed", "error": str(e)[:500]})
+        print(f"process_youtube_upload failed: {e}")
+    finally:
+        try:
+            if src and os.path.exists(src):
+                os.remove(src)
+        except Exception:
+            pass
+
+
 @app.function(image=image, secrets=[SECRET])
 @modal.fastapi_endpoint(method="POST")
 def generate(payload: dict, authorization: str = fastapi.Header(default="")):
     if authorization != f"Bearer {os.environ['WORKER_TOKEN']}":
         raise fastapi.HTTPException(status_code=401, detail="unauthorized")
+
+    # Schedule for YouTube — upload a Drive master to the channel (private + publishAt).
+    _action = (payload.get("action") or "").strip().lower()
+    if _action == "upload_youtube":
+        for field in ("upload_id", "master_url"):
+            if not payload.get(field):
+                raise fastapi.HTTPException(status_code=400, detail=f"missing {field}")
+        process_youtube_upload.spawn(payload)
+        return {"accepted": True, "upload_id": payload["upload_id"], "action": _action}
 
     # Per-clip ops share this endpoint, distinguished by `action`. An absent `action`
     # is a normal full-generate job (unchanged contract).
