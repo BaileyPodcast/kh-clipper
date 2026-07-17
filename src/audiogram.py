@@ -35,8 +35,12 @@ import subprocess
 
 SQUARE = (1080, 1080)
 VERTICAL = (1080, 1920)
+LANDSCAPE = (1920, 1080)
 FPS = 30
 NBARS = 44
+
+# Logo colourways available in assets/logo/suite (logo-primary-<colourway>.png).
+LOGO_COLOURWAYS = {"allblack", "allwhite", "black"}
 
 # Logos in the three suite colourways (copied from kh-studio's social suite).
 LOGO_DIR = "assets/logo/suite"
@@ -81,6 +85,117 @@ def palette_for(series):
 def _hex(h):
     h = h.lstrip("#")
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _valid_hex(v):
+    """True for a 6-digit hex colour string, with or without the leading #."""
+    return isinstance(v, str) and re.fullmatch(r"#?[0-9a-fA-F]{6}", v.strip()) is not None
+
+
+def resolve_brand(series, brand):
+    """Resolve the render palette + text tokens from a series slug plus an optional
+    per-request `brand` override block (kh-studio's studio_video_jobs contract).
+
+    Every key falls back INDEPENDENTLY: a valid brand value wins, anything missing
+    or malformed falls back to the series palette (then the kintsugi-heroes
+    fallback inside palette_for). A malformed brand block can never raise; issues
+    are reported in `notes` so the worker can surface them in the job message.
+
+    Returns (pal, texts, notes):
+      pal:   {bg, ink, accent, logo, seed} ready for _build_static/_render
+      texts: {eyebrow, display_name, tagline} (display_name/tagline may be None)
+      notes: human-readable fallback notes (empty when the brand applied cleanly)
+    """
+    pal = dict(palette_for(series))
+    slug = (series or "").strip().lower()
+    texts = {"eyebrow": SERIES_LABEL.get(slug, series or "Kintsugi Heroes"),
+             "display_name": None, "tagline": None}
+    notes = []
+    if brand is None:
+        return pal, texts, notes
+    if not isinstance(brand, dict):
+        notes.append("brand block ignored (not an object)")
+        return pal, texts, notes
+
+    def colour(key, *cands):
+        vals = [brand.get(c) for c in cands if brand.get(c) is not None]
+        if not vals:
+            return
+        for v in vals:
+            if _valid_hex(v):
+                pal[key] = "#" + str(v).strip().lstrip("#")
+                return
+        notes.append(f"brand {key} invalid, using series colour")
+
+    colour("bg", "bg")
+    colour("ink", "ink")
+    # The suite uses one colour for wave + accent; accept either key.
+    colour("accent", "accent", "wave")
+    # panel / highlight are part of the wire contract but this renderer has no
+    # surface for them yet; they are accepted and ignored.
+
+    logo = brand.get("logo_colourway")
+    if logo is not None:
+        if str(logo).strip() in LOGO_COLOURWAYS:
+            pal["logo"] = str(logo).strip()
+        else:
+            notes.append("brand logo_colourway unknown, using series logo")
+
+    seed = brand.get("seed")
+    if seed is not None:
+        try:
+            pal["seed"] = int(seed)
+        except (TypeError, ValueError):
+            notes.append("brand seed invalid, using series seed")
+
+    for tkey in ("eyebrow", "display_name", "tagline"):
+        v = brand.get(tkey)
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip():
+            texts[tkey] = v.strip()
+        else:
+            notes.append(f"brand {tkey} invalid, ignored")
+    return pal, texts, notes
+
+
+def window_words(words, start_sec, end_sec):
+    """Slice absolute-time transcript words to the [start_sec, end_sec] window and
+    rebase them to window-relative seconds. Overlap-inclusive, robust to junk
+    entries (missing/non-numeric times or empty text are dropped)."""
+    out = []
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        try:
+            ws, we = float(w.get("start")), float(w.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if we <= start_sec or ws >= end_sec:
+            continue
+        text = str(w.get("text", "")).strip()
+        if not text:
+            continue
+        out.append({"text": text,
+                    "start": max(0.0, ws - start_sec),
+                    "end": max(0.0, min(we, end_sec) - start_sec)})
+    return out
+
+
+def group_caption_lines(words, max_sec=3.5, max_words=7):
+    """Group window-relative words into short timed caption chunks, each a few
+    seconds / a few words long. Returns [{start, end, text}, ...] in order."""
+    chunks, cur = [], []
+    for w in words or []:
+        if cur and (float(w["end"]) - float(cur[0]["start"]) > max_sec
+                    or len(cur) >= max_words):
+            chunks.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        chunks.append(cur)
+    return [{"start": float(c[0]["start"]), "end": float(c[-1]["end"]),
+             "text": " ".join(w["text"] for w in c)} for c in chunks]
 
 
 def _kh_voice(text):
@@ -208,15 +323,22 @@ def _text_spaced(draw, xy, text, font, fill, tracking_px, anchor_right=False):
     return total
 
 
-def _build_static(frame, pal, here, *, caption, title, guest, eyebrow, ep_label):
+def _build_static(frame, pal, here, *, caption, title, guest, eyebrow, ep_label,
+                  timed_captions=False):
     """Compose the full still frame minus the waveform bars and the progress fill
-    (those are drawn per-frame). Returns (numpy RGB array, layout dict)."""
+    (those are drawn per-frame). Returns (numpy RGB array, layout dict).
+
+    timed_captions=True skips drawing the static caption and instead reserves the
+    caption slot (exported in the layout as `cap_slot` + `cap_font`) so _render
+    can swap the caption line per frame. Default False keeps the existing
+    square/vertical behaviour byte-identical."""
     import numpy as np
     from PIL import Image, ImageDraw
 
     W, H = frame
     cqw = min(W, H) / 100.0
     tall = H > W
+    wide = W > H
 
     def px(v):
         return v * cqw
@@ -250,16 +372,18 @@ def _build_static(frame, pal, here, *, caption, title, guest, eyebrow, ep_label)
     def font(key, size_cqw):
         return ImageFont.truetype(os.path.join(fdir, FONTS[key]), max(1, int(round(px(size_cqw)))))
 
-    pad_x = px(7) if tall else px(8)
-    pad_y = px(8)
+    # Wide 16:9 gets its own tuned constants (the tall/square values are relative
+    # to a 1080 min dimension and read cramped on a 1920-wide frame).
+    pad_x = px(6) if wide else (px(7) if tall else px(8))
+    pad_y = px(6) if wide else px(8)
     c_left, c_right = pad_x, W - pad_x
     c_top, c_bottom = pad_y, H - pad_y
     c_w = c_right - c_left
 
-    logo_h = px(12 if tall else 8.6)
-    eye_size = 3.8 if tall else 2.5
-    cap_size = 5.4 if tall else 4.4
-    eq_h = px(34 if tall else 24)
+    logo_h = px(7.5) if wide else px(12 if tall else 8.6)
+    eye_size = 2.2 if wide else (3.8 if tall else 2.5)
+    cap_size = 4.0 if wide else (5.4 if tall else 4.4)
+    eq_h = px(22) if wide else px(34 if tall else 24)
 
     # --- Top row: logo left, eyebrow right ---
     logo_path = os.path.join(here, LOGO_DIR, f"logo-primary-{pal['logo']}.png")
@@ -321,12 +445,13 @@ def _build_static(frame, pal, here, *, caption, title, guest, eyebrow, ep_label)
 
     # --- Centre block: waveform row + caption, centred in the free space ---
     cap_font = font("archivo_700", cap_size)
-    cap_max_w = px(84)
-    cap_lines = _wrap(draw, caption, cap_font, cap_max_w) if caption else []
+    cap_max_w = (W * 0.72) if wide else px(84)
+    cap_lines = _wrap(draw, caption, cap_font, cap_max_w) if (caption and not timed_captions) else []
     line_h = px(cap_size) * 1.28
-    cap_block_h = len(cap_lines) * line_h
+    # Timed mode reserves a fixed two-line slot; static mode sizes to the caption.
+    cap_block_h = (2 * line_h) if timed_captions else len(cap_lines) * line_h
     centre_gap = px(5)
-    centre_h = eq_h + (centre_gap + cap_block_h if cap_lines else 0)
+    centre_h = eq_h + (centre_gap + cap_block_h if (cap_lines or timed_captions) else 0)
 
     free_top = c_top + top_row_h
     free_bottom = bottom_top
@@ -334,6 +459,11 @@ def _build_static(frame, pal, here, *, caption, title, guest, eyebrow, ep_label)
 
     eq_center_y = centre_top + eq_h / 2
     layout["eq_center_y"] = eq_center_y
+
+    if timed_captions:
+        layout["cap_slot"] = {"y": centre_top + eq_h + centre_gap,
+                              "line_h": line_h, "max_w": cap_max_w}
+        layout["cap_font"] = cap_font
 
     # Caption (static), centred under the waveform
     if cap_lines:
@@ -357,13 +487,18 @@ def _duration(path):
 
 
 def _render(clip_in, out_path, frame, pal, here, *, caption, title, guest,
-            eyebrow, ep_label, bars, amps):
+            eyebrow, ep_label, bars, amps, timed_lines=None):
     """Draw every frame (static layer + live waveform + live progress) and mux the
-    clip's own audio under it -> MP4."""
+    clip's own audio under it -> MP4.
+
+    timed_lines: optional [{start, end, text}] caption chunks (clip-relative
+    seconds, from group_caption_lines). When present the caption slot swaps per
+    frame; when None the caption stays static, exactly as before."""
     import numpy as np
     from PIL import Image, ImageDraw
 
     W, H = frame
+    wide = W > H
     dur = _duration(clip_in)
     if dur <= 0:
         raise RuntimeError("could not read clip duration for audiogram")
@@ -371,11 +506,12 @@ def _render(clip_in, out_path, frame, pal, here, *, caption, title, guest,
 
     static, L = _build_static(
         frame, pal, here, caption=caption, title=title, guest=guest,
-        eyebrow=eyebrow, ep_label=ep_label)
+        eyebrow=eyebrow, ep_label=ep_label, timed_captions=timed_lines is not None)
 
     cqw = L["cqw"]
-    bar_w = cqw * 1.4
-    gap = cqw * 0.7
+    # Wide 16:9 gets broader bars so the 44-bar row fills the frame.
+    bar_w = cqw * (2.2 if wide else 1.4)
+    gap = cqw * (1.1 if wide else 0.7)
     radius = cqw * 0.7
     total_w = NBARS * bar_w + (NBARS - 1) * gap
     x0 = (W - total_w) / 2.0
@@ -386,6 +522,36 @@ def _render(clip_in, out_path, frame, pal, here, *, caption, title, guest,
     px07 = L["prog_h"]
     prog_x, prog_w, prog_y = L["prog_x"], L["prog_w"], L["prog_y"]
     min_scale = 0.34
+
+    # Pre-wrap the timed caption chunks and give each a display window that holds
+    # until the next chunk starts (no flicker in the silence between words).
+    chunks = []
+    if timed_lines:
+        cap_font = L["cap_font"]
+        slot = L["cap_slot"]
+        probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        ordered = sorted(timed_lines, key=lambda c: float(c["start"]))
+        for i, ch in enumerate(ordered):
+            text = _kh_voice(str(ch.get("text", "")))
+            if not text:
+                continue
+            show_from = float(ch["start"])
+            show_to = (float(ordered[i + 1]["start"]) if i + 1 < len(ordered)
+                       else min(dur, float(ch["end"]) + 1.5))
+            lines = _wrap(probe, text, cap_font, slot["max_w"])[:3]
+            chunks.append((show_from, show_to, lines))
+
+    def _draw_caption(d, t):
+        for show_from, show_to, lines in chunks:
+            if show_from <= t < show_to:
+                cy = slot["y"]
+                ascent = cap_font.getbbox("Ag")[1]
+                for ln in lines:
+                    lw = d.textlength(ln, font=cap_font)
+                    d.text(((W - lw) / 2, cy - ascent), ln, font=cap_font,
+                           fill=L["ink"] + (255,))
+                    cy += slot["line_h"]
+                return
 
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
            "-r", str(FPS), "-i", "-", "-i", clip_in,
@@ -417,6 +583,8 @@ def _render(clip_in, out_path, frame, pal, here, *, caption, title, guest,
             fill_w = max(px07, prog_w * frac)
             d.rounded_rectangle([prog_x, prog_y, prog_x + fill_w, prog_y + px07],
                                 radius=px07 / 2, fill=accent + (255,))
+            if chunks:
+                _draw_caption(d, t)
             proc.stdin.write(frame_img.tobytes())
         proc.stdin.close()
         err = proc.stderr.read().decode("utf-8", "ignore")
@@ -467,6 +635,48 @@ def render(clip_in, words, out_base, series=None, here=None,
             guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps)
     print(f"  audiogram {os.path.basename(vt)}")
     return [sq, vt]
+
+
+def render_landscape(clip_in, out_path, *, series=None, brand=None, words=None,
+                     caption=None, title=None, guest_name=None, ep_label=None,
+                     here=None):
+    """Render ONE 16:9 landscape audiogram (1920x1080) as MP4 for the kh-studio
+    "video" action. Same visual language as the square/vertical audiograms, laid
+    out for a wide frame. Does not touch the existing render() outputs.
+
+    brand: optional per-request override block (bg/ink/wave/accent hexes,
+            eyebrow/display_name/tagline text, logo_colourway, seed). Every key
+            falls back independently to the series palette; a malformed block
+            never fails the render (see resolve_brand).
+    words: optional window-relative word timings (from window_words). Present ->
+            timed caption lines swap in the caption slot; absent -> one static
+            caption line (caption, else title, else the brand tagline).
+
+    Returns (out_path, notes); notes lists any brand keys that fell back.
+    """
+    here = here or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pal, texts, notes = resolve_brand(series, brand)
+    eyebrow = texts["eyebrow"]
+    footer_title = title or texts["display_name"] or ""
+    cap = (_kh_voice(caption) or _kh_voice(footer_title)
+           or _kh_voice(texts["tagline"] or ""))
+    bars = _seeded_bars(pal["seed"])
+
+    pcm = _audio_pcm(clip_in)
+    dur = _duration(clip_in)
+    nframes = max(1, int(round(dur * FPS)))
+    amps = _band_amps(pcm, 22050, nframes) if pcm is not None else None
+
+    timed = None
+    if words:
+        timed = [c for c in group_caption_lines(words) if _kh_voice(c["text"])]
+        timed = timed or None
+
+    _render(clip_in, out_path, LANDSCAPE, pal, here, caption=cap,
+            title=footer_title, guest=guest_name, eyebrow=eyebrow,
+            ep_label=ep_label, bars=bars, amps=amps, timed_lines=timed)
+    print(f"  audiogram {os.path.basename(out_path)}")
+    return out_path, notes
 
 
 def main():
