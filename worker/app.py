@@ -28,6 +28,8 @@ Deploy:
     no token is sent in the request. Shorts jobs don't use them.
 
 Storage: a PRIVATE bucket named `shorts`. Studio reads via short-lived signed URLs.
+The action="video" landscape audiogram job writes to a second private bucket,
+`studio-video`, and streams progress into `studio_video_jobs` (KH-VRL-001).
 """
 import os
 
@@ -36,6 +38,7 @@ import modal
 
 APP_NAME = "kh-shorts-worker"
 BUCKET = "shorts"
+VIDEO_BUCKET = "studio-video"       # landscape audiogram outputs (action="video")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Image: Python 3.12 (broad compatibility) + ffmpeg + the pipeline deps + the repo.
@@ -103,6 +106,26 @@ def patch_job(job_id, fields):
             print(f"patch_job {r.status_code}: {r.text[:200]}")
     except Exception as e:                       # progress is best-effort
         print(f"patch_job failed: {e}")
+
+
+def patch_video_job(job_id, fields):
+    """PATCH a studio_video_jobs row (service role bypasses RLS). Never raises.
+    Columns: status, stage, progress, message, error, output_url."""
+    import json as _json
+    import requests
+    try:
+        body = _json.dumps(fields, ensure_ascii=True)
+        r = requests.patch(
+            f"{_sb_url()}/rest/v1/studio_video_jobs",
+            headers=_sb_headers({"Content-Type": "application/json",
+                                 "Prefer": "return=minimal"}),
+            params={"id": f"eq.{job_id}"},
+            data=body, timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"patch_video_job {r.status_code}: {r.text[:200]}")
+    except Exception as e:                       # progress is best-effort
+        print(f"patch_video_job failed: {e}")
 
 
 def get_job(job_id):
@@ -237,19 +260,20 @@ def upload_clip_files(job_id, clip_id, files, tag):
     return out
 
 
-def upload_file(local_path, remote_path):
-    """Upload one file to the private Storage bucket (upsert). Returns the storage path."""
+def upload_file(local_path, remote_path, bucket=BUCKET):
+    """Upload one file to a private Storage bucket (upsert). Returns the storage path.
+    Defaults to the `shorts` bucket so every existing call is untouched."""
     import requests
     ext = os.path.splitext(local_path)[1].lower()
     with open(local_path, "rb") as f:
         r = requests.post(
-            f"{_sb_url()}/storage/v1/object/{BUCKET}/{remote_path}",
+            f"{_sb_url()}/storage/v1/object/{bucket}/{remote_path}",
             headers=_sb_headers({"Content-Type": CONTENT_TYPES.get(ext, "application/octet-stream"),
                                  "x-upsert": "true"}),
             data=f.read(), timeout=300,
         )
     r.raise_for_status()
-    return f"{BUCKET}/{remote_path}"
+    return f"{bucket}/{remote_path}"
 
 
 # Human-readable file labels so downloads are obvious (not cryptic clip ids).
@@ -258,7 +282,44 @@ KIND_LABEL = {
     "universal": "Reel-TikTok Clip",
     "audiogram_square": "Audiogram Square Clip",
     "audiogram_vertical": "Audiogram Vertical Clip",
+    "audiogram_landscape": "Audiogram Landscape",
 }
+
+
+# ----------------------------------------------------------------------
+# action="video" (kh-studio KH-VRL-001): validation + the landscape audiogram job.
+# ----------------------------------------------------------------------
+VIDEO_FORMATS = {"audiogram_landscape"}
+VIDEO_WINDOW_MIN_SEC = 10
+VIDEO_WINDOW_MAX_SEC = 180
+
+
+def validate_video_payload(payload):
+    """Validate an action="video" payload. Returns None when valid, else a short
+    human-readable reason (the endpoint turns it into a 400). Pure stdlib so it
+    is unit-testable without Modal or fastapi."""
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    for field in ("job_id", "url", "series"):
+        v = payload.get(field)
+        if not isinstance(v, str) or not v.strip():
+            return f"missing {field}"
+    fmt = payload.get("format")
+    if fmt not in VIDEO_FORMATS:
+        return f"unknown format {fmt!r}"
+    start, end = payload.get("start_sec"), payload.get("end_sec")
+    for name, v in (("start_sec", start), ("end_sec", end)):
+        if isinstance(v, bool) or not isinstance(v, int):
+            return f"{name} must be an integer"
+    if start < 0:
+        return "start_sec must be >= 0"
+    if start >= end:
+        return "start_sec must be before end_sec"
+    window = end - start
+    if window < VIDEO_WINDOW_MIN_SEC or window > VIDEO_WINDOW_MAX_SEC:
+        return (f"window must be {VIDEO_WINDOW_MIN_SEC}..{VIDEO_WINDOW_MAX_SEC} "
+                f"seconds (got {window})")
+    return None
 
 
 def upload_outputs(job_id, result):
@@ -433,6 +494,119 @@ def process_job(job_id: str, url: str, series: str = None,
                            "message": f"{len(outputs['clips'])} clips ready"})
     except Exception as e:
         patch_job(job_id, {"status": "error", "error": str(e)[:500]})
+        raise
+
+
+# ----------------------------------------------------------------------
+# action="video": render ONE 16:9 landscape audiogram for a window of an episode
+# (KH-VRL-001 Wave 1). Drives progress through studio_video_jobs and uploads to
+# the `studio-video` bucket. Audio only: no 1080p video fetch, no 35s clip cap.
+# ----------------------------------------------------------------------
+def _drive_file_id(url):
+    """Google Drive file id from a Drive link, or None (same regex as process_job)."""
+    import re
+    m = re.search(r"drive\.google\.com/(?:file/d/|open\?id=|uc\?id=|.*[?&]id=)([A-Za-z0-9_-]{20,})", url or "")
+    return m.group(1) if m else None
+
+
+def _fetch_audio_window(url, start, end, out_path):
+    """Pull ONLY the [start, end] audio window from YouTube (bestaudio + a section
+    download, force_keyframes for accurate edges). Writes out_path (m4a)."""
+    import sys
+    sys.path.insert(0, "/root")
+    import yt_dlp
+    from src import ytdlp
+    base = out_path[:-len(".m4a")] if out_path.endswith(".m4a") else out_path
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": base + ".%(ext)s",
+        "download_ranges": yt_dlp.utils.download_range_func(None, [(float(start), float(end))]),
+        "force_keyframes_at_cuts": True,       # exact in/out points
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
+        "quiet": True, "no_warnings": True,
+        **ytdlp.resilience_opts(),             # player-client + cookies bypass for cloud IPs
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
+        raise RuntimeError("YouTube audio window download failed")
+    return out_path
+
+
+@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+def process_video_job(payload: dict):
+    import subprocess
+    import sys
+    sys.path.insert(0, "/root")
+    os.chdir("/root")
+    _write_cookies()
+
+    job_id = payload.get("job_id")
+
+    def prog(stage, pct, msg=""):
+        patch_video_job(job_id, {"status": "running", "stage": stage,
+                                 "progress": int(pct), "message": msg})
+
+    try:
+        # kh-studio has a 45s stall watchdog on 'queued', so go running immediately.
+        prog("fetch", 5, "Fetching audio for the selected window")
+
+        # Defensive re-validation (the endpoint already 400s bad payloads).
+        err = validate_video_payload(payload)
+        if err:
+            raise RuntimeError(f"invalid job payload: {err}")
+        url = payload["url"]
+        start, end = int(payload["start_sec"]), int(payload["end_sec"])
+
+        os.makedirs("/tmp/vjob", exist_ok=True)
+        audio_path = "/tmp/vjob/window.m4a"
+
+        file_id = _drive_file_id(url)
+        if file_id:
+            # Google Drive master: download, then extract just the window's audio.
+            prog("fetch", 8, "Downloading the master from Google Drive")
+            import gdown
+            src = f"/tmp/vjob/{file_id}.mp4"
+            gdown.download(id=file_id, output=src, quiet=True)
+            if not os.path.exists(src) or os.path.getsize(src) < 10000:
+                raise RuntimeError("Drive download failed. Is the file shared 'anyone with the link'?")
+            prog("fetch", 20, "Extracting the audio window")
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", src,
+                 "-vn", "-ac", "2", "-c:a", "aac", audio_path],
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"audio extract failed: {r.stderr[-400:]}")
+        else:
+            # YouTube: pull only the window's audio, never the 1080p video.
+            prog("fetch", 10, "Pulling the audio window from YouTube")
+            _fetch_audio_window(url, start, end, audio_path)
+
+        prog("render", 30, "Rendering the landscape audiogram")
+        from src import audiogram
+
+        words = None
+        transcript = payload.get("transcript")
+        if isinstance(transcript, dict) and transcript.get("words"):
+            words = audiogram.window_words(transcript["words"], start, end) or None
+        title = transcript.get("title") if isinstance(transcript, dict) else None
+
+        out_path = "/tmp/vjob/audiogram_landscape.mp4"
+        _, notes = audiogram.render_landscape(
+            audio_path, out_path, series=payload.get("series"),
+            brand=payload.get("brand"), words=words, title=title,
+            guest_name=payload.get("guest_name"))
+
+        prog("upload", 90, "Uploading the finished video")
+        storage_path = upload_file(out_path, f"{job_id}/audiogram_landscape.mp4",
+                                   bucket=VIDEO_BUCKET)
+        msg = "Ready for review"
+        if notes:
+            msg += " (" + "; ".join(notes) + ")"
+        patch_video_job(job_id, {"status": "review", "stage": "done", "progress": 100,
+                                 "output_url": storage_path, "message": msg})
+    except Exception as e:
+        patch_video_job(job_id, {"status": "error", "error": str(e)[:500]})
         raise
 
 
@@ -731,6 +905,14 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
                 raise fastapi.HTTPException(status_code=400, detail=f"missing {field}")
         process_youtube_upload.spawn(payload)
         return {"accepted": True, "upload_id": payload["upload_id"], "action": _action}
+
+    # Landscape audiogram for a window of an episode (KH-VRL-001, action="video").
+    if _action == "video":
+        err = validate_video_payload(payload)
+        if err:
+            raise fastapi.HTTPException(status_code=400, detail=err)
+        process_video_job.spawn(payload)
+        return {"accepted": True, "job_id": payload["job_id"], "action": _action}
 
     # Per-clip ops share this endpoint, distinguished by `action`. An absent `action`
     # is a normal full-generate job (unchanged contract).

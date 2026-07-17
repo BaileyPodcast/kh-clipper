@@ -60,6 +60,38 @@ sets the transcript `id` from the source it cuts and sanity-checks the transcrip
 against the media before trusting it (bad fit → it re-transcribes). Omitted when the
 episode has no word-level timing — the worker transcribes the source itself, as before.
 
+## Landscape audiogram: `action: "video"` (KH-VRL-001)
+Same endpoint + token. Renders ONE 16:9 landscape audiogram (1920x1080) for a
+chosen window of an episode, driven by a `studio_video_jobs` row instead of
+`shorts_jobs`, and uploaded to a second **private** bucket, **`studio-video`**
+(create it once, like `shorts`).
+```
+POST {KH_SHORTS_WORKER_URL}   Authorization: Bearer {KH_SHORTS_WORKER_TOKEN}
+{ "action": "video", "job_id": "<studio_video_jobs uuid>",
+  "url": "<YouTube link or Google Drive file link>",
+  "series": "<slug>", "guest_name": "<name or null>",
+  "format": "audiogram_landscape",
+  "start_sec": 30, "end_sec": 105,        // window, 10..180 s
+  "transcript": { ... same shape as above, optional },
+  "brand": { "display_name"?, "eyebrow"?, "tagline"?, "bg"?, "ink"?, "wave"?,
+             "accent"?, "panel"?, "highlight"?, "logo_colourway"?, "seed"? } }
+```
+Returns `202 {accepted, job_id, action}`; `400` on missing/invalid fields or an
+unknown format. The worker fetches ONLY the window's audio (Drive: gdown +
+ffmpeg extract; YouTube: a bestaudio section download, never the 1080p video,
+and the 35s Shorts cap does not apply), renders `src/audiogram.py`'s landscape
+layout, and patches the row through
+`status: running` (`stage`: fetch -> render -> upload) to
+`{status:"review", progress:100, output_url:"studio-video/<job_id>/audiogram_landscape.mp4",
+message:"Ready for review"}`, or `{status:"error", error}` on failure.
+
+`brand` overrides the series palette per key (hex colours, eyebrow/display
+name/tagline text, `logo_colourway` in `allblack|allwhite|black`, waveform
+`seed`). Anything missing or malformed falls back to the series palette and is
+noted in `message`; a bad brand block never fails the job. With `transcript`
+present the caption slot shows timed lines from the window's words; without it
+the caption is a static line (title, else the brand tagline).
+
 ## Per-clip ops — the "reframe" / "replace" buttons
 The same endpoint + token handles per-clip re-renders, distinguished by `action`
 (absent `action` = a normal full-generate job, unchanged):
