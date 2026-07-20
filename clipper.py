@@ -26,7 +26,7 @@ import json
 import os
 
 from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
-                 review, audiogram, endscreen)
+                 review, audiogram, endscreen, moments as moments_mod)
 
 
 def _transcribe_local(source_path, provider, episode_id=None, output_root="output"):
@@ -80,7 +80,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
         series=None, end_screen=True, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
-        guest_name=None):
+        guest_name=None, moments=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -103,20 +103,36 @@ def run(url=None, provider="grok", transcript=None, source=None,
         tpath = transcript or _transcribe(url, provider, output_root)
     tdata = json.load(open(tpath))
 
-    # Stage 2 — detect
-    _p("detect", 35, "finding Kintsugi moments")
-    print(f"[2/5] Detecting Kintsugi moments (top {count})"
-          + ("" if use_llm else " (heuristic only)"))
-    result = detect.detect(tpath, use_llm=use_llm, top_n=count)
     cpath = tpath.replace(".transcript.json", ".clips.json")
-    json.dump(result, open(cpath, "w"), indent=2)
-    n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
-    print(f"      {len(result['clips'])} moments ({n_ok} ok, "
-          f"{len(result['clips']) - n_ok} flagged for review)  -> {cpath}")
-    # Never pad with weak/unsafe clips — if fewer than asked survived, say so.
-    if len(result["clips"]) < count:
-        print(f"      note: only {len(result['clips'])} clean moment(s) cleared the "
-              f"gate (asked for {count}). Shipping what's clean, not padding.")
+    if moments:
+        # Exact-cut (Wave 1): render the board-approved windows instead of
+        # auto-selecting. The worker RE-RUNS its own safety gate on each window
+        # (moments_mod uses detect.assess_safety), so the trauma-informed gate is
+        # never bypassed. Auto-select stays the default when `moments` is absent.
+        _p("detect", 35, "cutting approved moments")
+        print(f"[2/5] Exact-cut: rendering {len(moments)} approved moment(s)")
+        clips = moments_mod.build_moment_clips(
+            tdata, moments, max_sec=max_sec, episode_id=episode_id)
+        result = {"clips": clips, "title": tdata.get("title", ""),
+                  "candidate_pool": [], "source": "exact_cut"}
+        json.dump(result, open(cpath, "w"), indent=2)
+        n_ok = sum(1 for c in clips if c.get("safety", "ok") == "ok")
+        print(f"      {len(clips)} moment(s) resolved ({n_ok} ok, "
+              f"{len(clips) - n_ok} flagged for review)  -> {cpath}")
+    else:
+        # Stage 2, detect (auto-select)
+        _p("detect", 35, "finding Kintsugi moments")
+        print(f"[2/5] Detecting Kintsugi moments (top {count})"
+              + ("" if use_llm else " (heuristic only)"))
+        result = detect.detect(tpath, use_llm=use_llm, top_n=count)
+        json.dump(result, open(cpath, "w"), indent=2)
+        n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
+        print(f"      {len(result['clips'])} moments ({n_ok} ok, "
+              f"{len(result['clips']) - n_ok} flagged for review)  -> {cpath}")
+        # Never pad with weak/unsafe clips — if fewer than asked survived, say so.
+        if len(result["clips"]) < count:
+            print(f"      note: only {len(result['clips'])} clean moment(s) cleared the "
+                  f"gate (asked for {count}). Shipping what's clean, not padding.")
 
     # Stage 2.7 — per-clip metadata pack (title/description/hashtags/pinned/banner).
     # Non-fatal: if Grok or the key is unavailable, the videos still cut and the
