@@ -431,7 +431,7 @@ def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None)
 @app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
-                guest_name: str = None, transcript: dict = None):
+                guest_name: str = None, transcript: dict = None, moments: list = None):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -463,13 +463,14 @@ def process_job(job_id: str, url: str, series: str = None,
                 source_file=src, episode_id=file_id, series=series, count=count,
                 make_audiogram=audiogram, progress_cb=progress, output_root="/tmp/job",
                 reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
+                moments=moments,
             )
         else:
             tpath = _prepare_supplied_transcript(transcript, _youtube_id(url))
             result = clipper.run(
                 url=url, series=series, count=count, make_audiogram=audiogram,
                 progress_cb=progress, output_root="/tmp/job", reframe_mode=reframe,
-                guest_name=guest_name, transcript=tpath,
+                guest_name=guest_name, transcript=tpath, moments=moments,
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
         outputs = upload_outputs(job_id, result)
@@ -934,6 +935,19 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
     for field in ("job_id", "url"):
         if not payload.get(field):
             raise fastapi.HTTPException(status_code=400, detail=f"missing {field}")
+
+    # Exact-cut (Wave 1): an optional list of board-approved windows to render
+    # instead of auto-selecting. Validated here so a bad payload fails fast (400)
+    # rather than mid-render. Absent -> the unchanged auto-select flow.
+    moments = payload.get("moments")
+    if moments is not None:
+        import sys as _sys
+        _sys.path.insert(0, "/root")
+        from src import moments as _moments_mod
+        err = _moments_mod.validate_moments(moments)
+        if err:
+            raise fastapi.HTTPException(status_code=400, detail=f"invalid moments: {err}")
+
     process_job.spawn(
         payload["job_id"], payload["url"], payload.get("series"),
         int(payload.get("count", 5)), bool(payload.get("audiogram", True)),
@@ -946,5 +960,7 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         # so the worker can skip re-transcribing. Absent -> we transcribe the
         # source ourselves, exactly as before.
         payload.get("transcript"),
+        # Exact-cut windows (or None for auto-select).
+        moments,
     )
     return {"accepted": True, "job_id": payload["job_id"]}
