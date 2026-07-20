@@ -96,12 +96,26 @@ def run(url=None, provider="grok", transcript=None, source=None,
     # Stages 0-1. A local master (e.g. downloaded from Google Drive) skips YouTube
     # entirely: transcribe from the file and cut from it locally.
     _p("fetch", 0, "fetching + transcribing")
+    # Brief 2 (transcribe once, reuse everywhere): a supplied transcript is the
+    # app's stored AssemblyAI words (worker/app.py already validated it against the
+    # media). When present we reuse it and NEVER run Grok STT; only a missing or
+    # rejected transcript falls through to _transcribe below.
+    reused = bool(transcript)
     if source_file:
         tpath = transcript or _transcribe_local(source_file, provider, episode_id, output_root, usage_ctx=usage_ctx)
         source = source or source_file        # cut locally from the master
     else:
         tpath = transcript or _transcribe(url, provider, output_root, usage_ctx=usage_ctx)
     tdata = json.load(open(tpath))
+    # Record which transcription path actually ran (reported back in the result and
+    # fed to the cost log). Reuse logs a $0 row so the saving is visible; the STT
+    # paths already logged their own cost row inside _transcribe.
+    if reused:
+        transcript_source = "reuse_assemblyai"
+        transcribe.log_reuse(tdata.get("words"), usage_ctx)
+    else:
+        transcript_source = "whisperx" if str(tdata.get("provider")) == "whisperx" else "grok_stt"
+    print(f"[1/5] transcript_source = {transcript_source}")
 
     cpath = tpath.replace(".transcript.json", ".clips.json")
     if moments:
@@ -162,7 +176,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
         return {"episode_id": tdata.get("id"), "title": result.get("title"),
                 "series": series, "guest_name": guest_name, "clips": [],
                 "review_md_path": None, "transcript_path": tpath,
-                "candidate_pool": result.get("candidate_pool", [])}
+                "candidate_pool": result.get("candidate_pool", []),
+                "transcript_source": transcript_source}
     words_all = tdata["words"]
 
     # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
@@ -276,6 +291,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
         "review_md_path": review_path,
         "transcript_path": tpath,            # worker persists this for per-clip ops
         "candidate_pool": result.get("candidate_pool", []),
+        "transcript_source": transcript_source,   # reuse_assemblyai | grok_stt | whisperx
     }
 
 

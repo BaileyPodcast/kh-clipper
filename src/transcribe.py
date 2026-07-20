@@ -36,6 +36,21 @@ def transcribe(audio_path, provider="grok", language="en", keyterm=None, usage_c
     raise ValueError(f"Unknown provider: {provider!r} (use 'grok' or 'whisperx')")
 
 
+def log_reuse(words, usage_ctx):
+    """Brief 2: a reused AssemblyAI transcript means NO STT ran for this job. Log a
+    $0 row so the saving (vs the ~$0.10 Grok STT charge it replaced) is visible in
+    ai_usage_costs. Best-effort, never raises."""
+    ctx = usage_ctx or {}
+    usage.log_usage(
+        source=ctx.get("source", "worker"),
+        vendor="assemblyai", stage="stt", model="reuse",
+        units=usage.audio_seconds_from_words(words), unit_type="audio_seconds", usd=0.0,
+        job_id=ctx.get("job_id"),
+        meta={"transcript_source": "reuse_assemblyai",
+              **({"episode_ref": ctx["episode_ref"]} if ctx.get("episode_ref") else {})},
+    )
+
+
 def _log_stt(words, provider, usage_ctx):
     """Record a STT call in ai_usage_costs (Brief 1). WhisperX is $0 but still
     logs its audio-seconds so local volume is visible. Best-effort, never raises."""
