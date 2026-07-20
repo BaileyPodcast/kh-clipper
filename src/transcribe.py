@@ -18,22 +18,46 @@ which one ran:
 import os
 import requests
 
+try:
+    from . import usage                    # imported as a package
+except ImportError:
+    import usage                           # run as a script
+
 XAI_STT_URL = "https://api.x.ai/v1/stt"
 
 
 # ---------- public entry point ----------
 
-def transcribe(audio_path, provider="grok", language="en", keyterm=None):
+def transcribe(audio_path, provider="grok", language="en", keyterm=None, usage_ctx=None):
     if provider == "grok":
-        return _grok(audio_path, language=language, keyterm=keyterm)
+        return _grok(audio_path, language=language, keyterm=keyterm, usage_ctx=usage_ctx)
     elif provider == "whisperx":
-        return _whisperx(audio_path, language=language)
+        return _whisperx(audio_path, language=language, usage_ctx=usage_ctx)
     raise ValueError(f"Unknown provider: {provider!r} (use 'grok' or 'whisperx')")
+
+
+def _log_stt(words, provider, usage_ctx):
+    """Record a STT call in ai_usage_costs (Brief 1). WhisperX is $0 but still
+    logs its audio-seconds so local volume is visible. Best-effort, never raises."""
+    ctx = usage_ctx or {}
+    seconds = usage.audio_seconds_from_words(words)
+    if provider == "grok":
+        model, usd = "grok-stt", usage.grok_stt_usd(seconds)
+    else:
+        model, usd = "whisperx", 0.0
+    usage.log_usage(
+        source=ctx.get("source", "worker"),
+        vendor="xai" if provider == "grok" else "whisperx",
+        stage="stt", model=model, units=seconds, unit_type="audio_seconds", usd=usd,
+        job_id=ctx.get("job_id"),
+        meta={"transcript_source": ("grok_stt" if provider == "grok" else "whisperx"),
+              **({"episode_ref": ctx["episode_ref"]} if ctx.get("episode_ref") else {})},
+    )
 
 
 # ---------- provider: Grok STT (API) ----------
 
-def _grok(audio_path, language="en", keyterm=None):
+def _grok(audio_path, language="en", keyterm=None, usage_ctx=None):
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
         raise RuntimeError("XAI_API_KEY not set in environment.")
@@ -65,6 +89,7 @@ def _grok(audio_path, language="en", keyterm=None):
          "speaker": w.get("speaker")}
         for w in body.get("words", [])
     ]
+    _log_stt(words, "grok", usage_ctx)
     return {
         "provider": "grok",
         "text": body.get("text", ""),
@@ -74,7 +99,7 @@ def _grok(audio_path, language="en", keyterm=None):
 
 # ---------- provider: WhisperX (local fallback) ----------
 
-def _whisperx(audio_path, language="en"):
+def _whisperx(audio_path, language="en", usage_ctx=None):
     import whisperx
 
     # Mac mini = CPU + int8 (fastest/lowest-memory combo that works on Apple).
@@ -98,6 +123,7 @@ def _whisperx(audio_path, language="en"):
                 words.append({"text": w["word"], "start": w["start"], "end": w["end"]})
                 parts.append(w["word"])
 
+    _log_stt(words, "whisperx", usage_ctx)
     return {
         "provider": "whisperx",
         "text": " ".join(parts).strip(),

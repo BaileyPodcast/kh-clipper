@@ -32,10 +32,12 @@ try:
     from . import guardrails              # imported as a package
     from . import brand
     from . import packaging
+    from . import usage
 except ImportError:
     import guardrails                     # run as a script
     import brand
     import packaging
+    import usage
 
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.3"
@@ -90,7 +92,7 @@ def _clip_block(i, clip):
 
 
 def generate(clips, episode_title, episode_url, handle=None,
-             model=GROK_MODEL, api_key=None, guest_name=None, series=None):
+             model=GROK_MODEL, api_key=None, guest_name=None, series=None, usage_ctx=None):
     """Attach a `metadata` dict to each clip (in place) and return the clips.
     Raises on any failure so the caller can fall back to no-metadata.
 
@@ -140,7 +142,21 @@ def generate(clips, episode_title, episode_url, handle=None,
         timeout=180,
     )
     resp.raise_for_status()
-    data = json.loads(resp.json()["choices"][0]["message"]["content"])
+    body = resp.json()
+    # Cost log (Brief 1): the Shorts copy pass. Best-effort; never blocks the pack.
+    _u = body.get("usage") or {}
+    _ctx = usage_ctx or {}
+    usage.log_usage(
+        source=_ctx.get("source", "worker"),
+        vendor="xai", stage="copy", model=model,
+        units=(_u.get("prompt_tokens", 0) + _u.get("completion_tokens", 0)) or None,
+        unit_type="tokens",
+        usd=usage.grok_chat_usd(_u.get("prompt_tokens"), _u.get("completion_tokens")),
+        job_id=_ctx.get("job_id"),
+        meta={"input_tokens": _u.get("prompt_tokens"), "output_tokens": _u.get("completion_tokens"),
+              **({"episode_ref": _ctx["episode_ref"]} if _ctx.get("episode_ref") else {})},
+    )
+    data = json.loads(body["choices"][0]["message"]["content"])
     packs = data.get("packs", [])
     if not packs:
         raise ValueError("Grok returned no metadata packs.")

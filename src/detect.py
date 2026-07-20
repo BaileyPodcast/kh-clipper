@@ -469,7 +469,7 @@ def suppress_overlaps(clips, max_overlap=0.5):
 # Public entry point
 # ======================================================================
 
-def detect(transcript_path, use_llm=True, top_n=TOP_N):
+def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None):
     data = json.loads(Path(transcript_path).read_text())
     words = data["words"]
     guest_speaker = identify_guest(words)
@@ -494,7 +494,7 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N):
                 from . import rerank as rr      # imported as a package
             except ImportError:
                 import rerank as rr              # run as a script
-            picks = rr.rerank(shortlist, data.get("title", ""), top_n=top_n)
+            picks = rr.rerank(shortlist, data.get("title", ""), top_n=top_n, usage_ctx=usage_ctx)
             chosen = []
             for p in picks:
                 idx = p.get("index")

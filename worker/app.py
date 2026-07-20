@@ -464,6 +464,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 make_audiogram=audiogram, progress_cb=progress, output_root="/tmp/job",
                 reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
                 moments=moments,
+                usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": file_id},
             )
         else:
             tpath = _prepare_supplied_transcript(transcript, _youtube_id(url))
@@ -471,6 +472,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 url=url, series=series, count=count, make_audiogram=audiogram,
                 progress_cb=progress, output_root="/tmp/job", reframe_mode=reframe,
                 guest_name=guest_name, transcript=tpath, moments=moments,
+                usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": _youtube_id(url)},
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
         outputs = upload_outputs(job_id, result)
@@ -673,7 +675,9 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
             rendered = clipper.render_clip(
                 spec, url=url, words_all=words_all, series=series, guest_name=guest_name,
                 reframe_mode=str(reframe_mode or "speaker"), index=index,
-                output_root="/tmp/clipjob", with_metadata=False)
+                output_root="/tmp/clipjob", with_metadata=False,
+                usage_ctx={"job_id": job_id, "source": "worker",
+                           "episode_ref": outputs.get("episode_id") or job.get("episode_id")})
             cprog("running", 85, "uploading")
             files = upload_clip_files(job_id, clip_id, rendered.get("files"), tag)
             # Swap ONLY this clip's files + framing; keep its copy/metadata. Drop clip_job.
@@ -718,7 +722,9 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 spec, url=url, words_all=words_all, series=series, guest_name=guest_name,
                 reframe_mode=str(job.get("reframe") or "speaker"), index=index,
                 output_root="/tmp/clipjob", with_metadata=True,
-                episode_title=episode_title, episode_url=episode_url)
+                episode_title=episode_title, episode_url=episode_url,
+                usage_ctx={"job_id": job_id, "source": "worker",
+                           "episode_ref": outputs.get("episode_id") or job.get("episode_id")})
             cprog("running", 85, "uploading")
             files = upload_clip_files(job_id, clip_id, rendered.get("files"), tag)
             rendered["files"] = files
