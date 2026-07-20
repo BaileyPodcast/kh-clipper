@@ -1,19 +1,24 @@
 """
-Stage 2.7: metadata — the per-Short metadata pack (ready to post).
+Stage 2.7: metadata, the per-Short metadata pack (ready to post).
 
-"5 Shorts to use" means ready to post. Detect/rerank give us the clip, the hook, the
-why, the archetype and the transcript text. This stage turns each into a copy-paste
-metadata pack so there's no manual step before publishing:
+Detect/rerank give us the clip, the hook, the why, the archetype and the transcript
+text. This stage turns each into a copy-paste metadata pack so there's no manual step
+before publishing. The COPY follows the locked KH Shorts v5 standard, assembled by
+packaging.py (the worker's mirror of the app's shorts-packaging.ts):
 
-  title         — KH honest-curiosity style (no clickbait, no banned hype words)
-  description    — 2-3 sentences, natural keywords, full-episode link + @handle
-  hashtags       — exactly 2-3 hyper-relevant tags (never a wall of 30)
-  pinned_comment — one warm, trauma-informed line that invites safe engagement
-  banner_hook    — the short on-screen banner headline (curiosity-gap framing)
+  title          the short render-facing hook (the audiogram footer + on-screen
+                 banner read it; the app composes the 100-char YouTube upload title)
+  description    the locked 7-part v5 block (hook+SEO line, context, links, About-KH,
+                 series blurb, subscribe, 15 hashtags)
+  hashtags       exactly the locked 15, in order
+  tags           the 3-group tags field (Post Specific, Niche, Broad), flat
+  pinned_comment full-episode link + one open engagement question (crisis line on
+                 sensitive clips)
+  banner_hook    the short on-screen banner headline (curiosity-gap framing)
 
-KH-specific, trauma-informed, AU English, no em dashes. NO VidIQ — all scoring/voice
-is KH's own. The values rules come from guardrails.py (single source of truth); the
-prompt is composed from the same guardrail text rerank.py uses.
+KH-specific, trauma-informed, AU English, no em dashes. NO VidIQ, all scoring/voice
+is KH's own. Grok fills only the creative slots; packaging.py assembles the locked
+scaffolding. The values rules come from guardrails.py (single source of truth).
 
 Like rerank, this calls Grok and RAISES on any failure so the caller can carry on
 without metadata (the videos still cut; the producer just fills metadata manually).
@@ -26,15 +31,23 @@ import requests
 try:
     from . import guardrails              # imported as a package
     from . import brand
+    from . import packaging
 except ImportError:
     import guardrails                     # run as a script
     import brand
+    import packaging
 
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.3"
 
-METADATA_FIELDS = ("title", "description", "hashtags", "pinned_comment", "banner_hook")
+# Fields checked for banned words / em dashes (the render-facing title + banner and
+# the assembled copy). tags/hashtags come from the locked packaging module.
+METADATA_FIELDS = ("title", "description", "pinned_comment", "banner_hook")
 
+# The Grok call now fills ONLY the creative slots; packaging.py assembles the locked
+# v5 scaffolding (7-part description, 15 hashtags in order, 3-group tags, links,
+# blurbs, cadence) around them, so a worker-packaged Short matches an app-packaged
+# one for the same episode. See SHORTS-WORKER-CONTRACT.md.
 SYSTEM_PROMPT = f"""You write the publishing metadata for Kintsugi Heroes Shorts: a \
 not-for-profit podcast sharing real stories of resilience and transformation. You are \
 trauma-informed first and a growth-minded producer second. NEVER use VidIQ-style \
@@ -42,16 +55,22 @@ clickbait scoring; KH has its own honest voice.
 
 {guardrails.SYSTEM_PROMPT_GUARDRAILS}
 
-FOR EACH CLIP, produce a metadata pack:
-- title: a short, honest-curiosity title in KH's voice. A real curiosity gap, never \
-clickbait, never a banned hype word. Lead with the person, not the diagnosis or the \
-tragedy. It must pass the test: would the guest feel safe seeing this in their own feed?
-- description: 2 to 3 natural sentences with real keywords (no keyword stuffing). End \
-with the full-episode link and the @handle.
-- hashtags: EXACTLY 2 to 3 hyper-relevant tags (e.g. #shorts plus one or two niche \
-tags). Never a wall of tags.
-- pinned_comment: one warm, human line that invites safe engagement. NEVER prompt \
-unsafe public disclosure (do not ask people to share their trauma in the comments).
+The fixed scaffolding (About Kintsugi Heroes, the series blurb, the 15 hashtags in \
+their locked order, the tags field, the links and subscribe line) is assembled by the \
+app, not by you. FOR EACH CLIP, produce ONLY these creative slots:
+- title: a short, honest-curiosity title in KH's voice (the hook only, no brand \
+suffix, a few words). A real curiosity gap, never clickbait, never a banned hype word. \
+Lead with the person, not the diagnosis. Would the guest feel safe seeing this?
+- hook_seo_line: ONE human sentence under 150 characters carrying the emotional hook \
+AND 2 to 3 searchable keywords (the clip topic, "Kintsugi Heroes", the series name or \
+"Australian" where natural). Never keyword-stuffed.
+- context: 2 to 3 natural sentences from the transcript. Who, what, why it matters. \
+Lead with the person and the turning point, no spoilers of the full episode.
+- primary_topic: the single best topic for THIS clip, from: {", ".join(packaging.TOPIC_TAGS.keys())}.
+- secondary_topics: up to 3 more from that same list, different from the primary.
+- post_specific_tags: 3 to 6 clip-specific plain keywords (exact subject, key phrases). No hashes.
+- pinned_question: one open-ended question tied to THIS clip's theme that invites a \
+safe reply. NEVER ask anyone to disclose trauma in the comments.
 - banner_hook: a short on-screen banner headline using curiosity-gap framing \
 (e.g. "He can't feel his legs"). A few words, punchy, dignified.
 
@@ -71,39 +90,38 @@ def _clip_block(i, clip):
 
 
 def generate(clips, episode_title, episode_url, handle=None,
-             model=GROK_MODEL, api_key=None, guest_name=None):
+             model=GROK_MODEL, api_key=None, guest_name=None, series=None):
     """Attach a `metadata` dict to each clip (in place) and return the clips.
     Raises on any failure so the caller can fall back to no-metadata.
 
     `guest_name` (when known) is the real guest's name; Grok uses it naturally in
-    titles/descriptions/pinned comments instead of saying "our guest". When None we
-    fall back to today's generic wording."""
+    the title/context/pinned instead of "our guest". `series` is the worker series
+    slug, used to build the series-correct hashtags, tags and blurb."""
     api_key = api_key or os.environ.get("XAI_API_KEY")
     if not api_key:
-        raise RuntimeError("XAI_API_KEY not set — cannot generate the metadata pack.")
+        raise RuntimeError("XAI_API_KEY not set, cannot generate the metadata pack.")
     if not clips:
         return clips
     handle = handle or brand.CTA["copy"]["handle"]
 
     guest_line = (
         f'The guest\'s name is "{guest_name}". Use it naturally where you would otherwise '
-        f'say "our guest" or "this guest" (titles, descriptions, pinned comments); still '
-        f'lead with the person, never the diagnosis or the tragedy.\n'
+        f'say "our guest" or "this guest"; still lead with the person, never the '
+        f'diagnosis or the tragedy.\n'
         if guest_name else
-        "The guest's name is not provided — use warm, generic wording (no invented name).\n"
+        "The guest's name is not provided, use warm, generic wording (no invented name).\n"
     )
     blocks = "\n\n".join(_clip_block(i, c) for i, c in enumerate(clips))
     user_prompt = (
         f'Episode: "{episode_title}"\n'
         f"{guest_line}"
-        f"Full-episode link to use in every description: {episode_url}\n"
-        f"Handle to use: {handle}\n\n"
         f"Here are the {len(clips)} clips, each with an [index]:\n\n{blocks}\n\n"
-        f"For SENSITIVE clips (flagged above), the pinned_comment must gently include "
-        f"crisis support, exactly: \"{guardrails.CRISIS_SUPPORT_AU}\"\n\n"
         f'Return JSON exactly like: {{"packs": [{{"index": <int>, '
-        f'"title": "<title>", "description": "<2-3 sentences + link + handle>", '
-        f'"hashtags": ["#shorts", "#tag2"], "pinned_comment": "<one warm line>", '
+        f'"title": "<short hook title>", "hook_seo_line": "<under 150 chars>", '
+        f'"context": "<2-3 sentences>", "primary_topic": "<topic>", '
+        f'"secondary_topics": ["<topic>", "<topic>"], '
+        f'"post_specific_tags": ["<keyword>", "<keyword>"], '
+        f'"pinned_question": "<one open question>", '
         f'"banner_hook": "<short banner headline>"}}]}}'
     )
 
@@ -132,15 +150,31 @@ def generate(clips, episode_title, episode_url, handle=None,
         p = by_index.get(i)
         if not p:
             continue
-        hashtags = p.get("hashtags") or []
-        if isinstance(hashtags, str):
-            hashtags = [h.strip() for h in hashtags.replace(",", " ").split() if h.strip()]
-        hashtags = [h if h.startswith("#") else f"#{h}" for h in hashtags][:3]
+
+        # Assemble the locked v5 package from the creative slots (single source of
+        # truth in packaging.py, mirroring the app's shorts-packaging.ts).
+        hashtags = packaging.compose_hashtags(
+            series, p.get("primary_topic"), p.get("secondary_topics"))
+        description = packaging.compose_description(
+            series, p.get("hook_seo_line"), p.get("context"), hashtags,
+            full_episode_url=episode_url)
+        tags = packaging.compose_tags(
+            series, hero_name=guest_name, primary_topic=p.get("primary_topic"),
+            post_specific=p.get("post_specific_tags"))["flat"]
+        # Sensitive clips carry the crisis-support line in the pinned comment.
+        crisis = guardrails.CRISIS_SUPPORT_AU if clip.get("safety", "ok") != "ok" else None
+        pinned = packaging.compose_pinned(
+            p.get("pinned_question"), full_episode_url=episode_url, prefix=crisis)
+
         meta = {
+            # title + banner_hook stay the short, render-facing copy (the audiogram
+            # footer + on-screen banner read these); the app composes the 100-char
+            # YouTube upload title from `title` at approval time.
             "title": (p.get("title") or "").strip(),
-            "description": (p.get("description") or "").strip(),
+            "description": description,
             "hashtags": hashtags,
-            "pinned_comment": (p.get("pinned_comment") or "").strip(),
+            "tags": tags,
+            "pinned_comment": pinned,
             "banner_hook": (p.get("banner_hook") or "").strip(),
         }
         # Layer-1 validation pass: flag any banned word / em dash that slipped through

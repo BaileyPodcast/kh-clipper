@@ -127,7 +127,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             ep_url = f"https://www.youtube.com/watch?v={tdata.get('id')}"
             metadata.generate(result["clips"],
                               result.get("title") or tdata.get("title", ""), ep_url,
-                              guest_name=guest_name)
+                              guest_name=guest_name, series=series)
             json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
             n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
             print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
@@ -298,7 +298,7 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
                     "archetype": spec.get("archetype", ""),
                     "why": spec.get("why", ""), "text": spec.get("text", ""),
                     "safety": spec.get("safety", "ok")}]
-            metadata.generate(one, episode_title, episode_url, guest_name=guest_name)
+            metadata.generate(one, episode_title, episode_url, guest_name=guest_name, series=series)
             meta = one[0].get("metadata", meta)
         except Exception as e:
             print(f"      ! metadata pack skipped: {str(e)[:160]}")
