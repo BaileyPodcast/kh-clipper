@@ -26,7 +26,7 @@ without metadata (the videos still cut; the producer just fills metadata manuall
 
 import json
 import os
-import requests
+import re
 
 try:
     from . import guardrails              # imported as a package
@@ -39,8 +39,12 @@ except ImportError:
     import packaging
     import usage
 
-XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
-GROK_MODEL = "grok-4.3"
+# Shorts copy is written by Claude (Spring Clean Brief 3), the one Grok job where
+# model quality matters most: the KH voice rules run through the model that follows
+# them best. Match the model kh-studio pins for shorts copy (lib/studio/ai.ts
+# MODELS.fast) so app-written and worker-written copy come from the same model.
+# Grok still handles STT and moment ranking; this is copy only.
+ANTHROPIC_MODEL = "claude-haiku-4-5"
 
 # Fields checked for banned words / em dashes (the render-facing title + banner and
 # the assembled copy). tags/hashtags come from the locked packaging module.
@@ -91,17 +95,73 @@ def _clip_block(i, clip):
     )
 
 
+def _call_model(system_prompt, user_prompt, model, api_key):
+    """One Anthropic Messages call for the creative slots. Returns (text, usage
+    dict). Isolated so generate() stays focused on assembly (and so tests can swap
+    it). `anthropic` is imported lazily so importing this module never requires the
+    SDK (e.g. in a packaging-only test env)."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=8000,
+        temperature=0.5,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    text = "".join(getattr(b, "text", "") for b in resp.content
+                   if getattr(b, "type", None) == "text")
+    u = resp.usage
+    return text, {"input_tokens": getattr(u, "input_tokens", 0) or 0,
+                  "output_tokens": getattr(u, "output_tokens", 0) or 0}
+
+
+def _extract_packs(text):
+    """Parse the {"packs":[...]} object from Claude's text response, tolerating a
+    ```json fence or stray prose around it. Raises on no/incomplete JSON so the
+    caller falls back to no-metadata (the videos still cut)."""
+    s = (text or "").strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", s, re.IGNORECASE)
+    if fence:
+        s = fence.group(1).strip()
+    start = s.find("{")
+    if start == -1:
+        raise ValueError("No JSON object in the model response.")
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(s[start:i + 1])
+    raise ValueError("Incomplete JSON in the model response.")
+
+
 def generate(clips, episode_title, episode_url, handle=None,
-             model=GROK_MODEL, api_key=None, guest_name=None, series=None, usage_ctx=None):
+             model=ANTHROPIC_MODEL, api_key=None, guest_name=None, series=None, usage_ctx=None):
     """Attach a `metadata` dict to each clip (in place) and return the clips.
     Raises on any failure so the caller can fall back to no-metadata.
 
     `guest_name` (when known) is the real guest's name; Grok uses it naturally in
     the title/context/pinned instead of "our guest". `series` is the worker series
     slug, used to build the series-correct hashtags, tags and blurb."""
-    api_key = api_key or os.environ.get("XAI_API_KEY")
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise RuntimeError("XAI_API_KEY not set, cannot generate the metadata pack.")
+        raise RuntimeError("ANTHROPIC_API_KEY not set, cannot generate the metadata pack.")
     if not clips:
         return clips
     handle = handle or brand.CTA["copy"]["handle"]
@@ -127,39 +187,24 @@ def generate(clips, episode_title, episode_url, handle=None,
         f'"banner_hook": "<short banner headline>"}}]}}'
     )
 
-    resp = requests.post(
-        XAI_CHAT_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.5,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=180,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    # Cost log (Brief 1): the Shorts copy pass. Best-effort; never blocks the pack.
-    _u = body.get("usage") or {}
+    text, tok = _call_model(SYSTEM_PROMPT, user_prompt, model, api_key)
+    # Cost log (Brief 1 + 3): the Shorts copy pass, now Claude. Best-effort; never
+    # blocks the pack.
     _ctx = usage_ctx or {}
     usage.log_usage(
         source=_ctx.get("source", "worker"),
-        vendor="xai", stage="copy", model=model,
-        units=(_u.get("prompt_tokens", 0) + _u.get("completion_tokens", 0)) or None,
+        vendor="anthropic", stage="copy", model=model,
+        units=(tok["input_tokens"] + tok["output_tokens"]) or None,
         unit_type="tokens",
-        usd=usage.grok_chat_usd(_u.get("prompt_tokens"), _u.get("completion_tokens")),
+        usd=usage.anthropic_usd(model, tok["input_tokens"], tok["output_tokens"]),
         job_id=_ctx.get("job_id"),
-        meta={"input_tokens": _u.get("prompt_tokens"), "output_tokens": _u.get("completion_tokens"),
+        meta={"input_tokens": tok["input_tokens"], "output_tokens": tok["output_tokens"],
               **({"episode_ref": _ctx["episode_ref"]} if _ctx.get("episode_ref") else {})},
     )
-    data = json.loads(body["choices"][0]["message"]["content"])
+    data = _extract_packs(text)
     packs = data.get("packs", [])
     if not packs:
-        raise ValueError("Grok returned no metadata packs.")
+        raise ValueError("Claude returned no metadata packs.")
 
     by_index = {p.get("index"): p for p in packs if p.get("index") is not None}
     for i, clip in enumerate(clips):

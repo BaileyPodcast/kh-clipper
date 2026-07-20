@@ -5,6 +5,10 @@ yt-dlp
 requests          # Grok STT API calls
 whisperx          # local fallback provider (Python <3.13 only; Grok STT otherwise)
 
+# Stage 2.7 — Shorts copy (metadata pack). Written by Claude (Brief 3); Grok keeps
+# STT + moment ranking.
+anthropic
+
 # Stages 3-5 — cutting, reframing, captioning
 # (ffmpeg itself must be installed separately:  Mac: brew install ffmpeg)
 ffmpeg-python
