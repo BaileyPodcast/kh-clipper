@@ -340,7 +340,9 @@ def upload_outputs(job_id, result):
         review = upload_file(result["review_md_path"], f"{job_id}/REVIEW.md")
     return {"episode_id": result.get("episode_id"), "title": result.get("title"),
             "series": result.get("series"), "guest_name": result.get("guest_name"),
-            "clips": clips, "review": review}
+            "clips": clips, "review": review,
+            # Brief 2: which transcription path ran (reuse_assemblyai | grok_stt | whisperx).
+            "transcript_source": result.get("transcript_source")}
 
 
 # ----------------------------------------------------------------------
