@@ -19,6 +19,7 @@ Deploy:
         WORKER_TOKEN=<a-long-random-shared-token> \
         GOOGLE_OAUTH_CLIENT_ID=<client-id> \
         GOOGLE_OAUTH_CLIENT_SECRET=<client-secret>
+    modal secret create anthropic ANTHROPIC_API_KEY=sk-ant-...   # Shorts copy (Brief 3); same key as the app
     modal deploy worker/app.py
     # -> prints the web endpoint URL. Put it + WORKER_TOKEN in Studio's server env.
 
@@ -53,7 +54,7 @@ image = (
     # pillow + numpy power the branded audiogram renderer (src/audiogram.py): it draws
     # each frame of the KH design-suite audiogram and ffmpeg muxes the clip audio under it.
     .pip_install("yt-dlp", "requests", "mediapipe", "ffmpeg-python", "fastapi[standard]",
-                 "gdown", "pillow", "numpy")
+                 "gdown", "pillow", "numpy", "anthropic")
     .add_local_file(os.path.join(REPO_ROOT, "clipper.py"), "/root/clipper.py")
     .add_local_dir(os.path.join(REPO_ROOT, "src"), "/root/src")
     .add_local_dir(os.path.join(REPO_ROOT, "assets"), "/root/assets")
@@ -67,6 +68,9 @@ COOKIE_SECRET = modal.Secret.from_name("yt-cookies")
 # xAI key in its own secret too — single-value, easy to set/rotate. Listed LAST so its
 # XAI_API_KEY overrides any stale value in kh-shorts.
 XAI_SECRET = modal.Secret.from_name("xai")
+# Anthropic key for the Shorts copy pass (Brief 3). Same key as the app (one bill);
+# create with:  modal secret create anthropic ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_SECRET = modal.Secret.from_name("anthropic")
 
 CONTENT_TYPES = {".mp4": "video/mp4", ".md": "text/markdown", ".json": "application/json"}
 
@@ -430,7 +434,7 @@ def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None)
         return None
 
 
-@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
                 guest_name: str = None, transcript: dict = None, moments: list = None):
@@ -620,7 +624,7 @@ def process_video_job(payload: dict):
 # finished job, driving progress through outputs.clips[i].clip_job and NEVER touching
 # the row `status` (it stays 'done' so the results view doesn't collapse).
 # ----------------------------------------------------------------------
-@app.function(image=image, timeout=900, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+@app.function(image=image, timeout=900, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
 def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                      series: str = None, guest_name: str = None,
                      reframe_mode: str = "speaker"):
