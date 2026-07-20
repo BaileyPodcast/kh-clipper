@@ -23,8 +23,10 @@ import requests
 
 try:
     from . import guardrails              # imported as a package
+    from . import usage
 except ImportError:
     import guardrails                     # run as a script
+    import usage
 
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.3"          # swap to "grok-4-1-fast-non-reasoning" for less cost
@@ -76,7 +78,7 @@ suicide, self-harm, overdose, death, acute crisis) told with care, or any third-
 You return STRICT JSON only."""
 
 
-def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None):
+def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None, usage_ctx=None):
     """candidates: list of dicts with keys index,start,end,length_sec,archetype,text.
     Returns a list of picks: {index, hook, archetype, why, score, lead_with,
     hook_formula, loopable, safety, safety_note}.
@@ -134,7 +136,22 @@ def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None):
         timeout=180,
     )
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
+    body = resp.json()
+    # Cost log (Brief 1): the Grok judgment pass. usage is best-effort — a missing
+    # usage block just logs zero tokens, never blocks the pick.
+    _u = body.get("usage") or {}
+    _ctx = usage_ctx or {}
+    usage.log_usage(
+        source=_ctx.get("source", "worker"),
+        vendor="xai", stage="rerank", model=model,
+        units=(_u.get("prompt_tokens", 0) + _u.get("completion_tokens", 0)) or None,
+        unit_type="tokens",
+        usd=usage.grok_chat_usd(_u.get("prompt_tokens"), _u.get("completion_tokens")),
+        job_id=_ctx.get("job_id"),
+        meta={"input_tokens": _u.get("prompt_tokens"), "output_tokens": _u.get("completion_tokens"),
+              **({"episode_ref": _ctx["episode_ref"]} if _ctx.get("episode_ref") else {})},
+    )
+    content = body["choices"][0]["message"]["content"]
     data = json.loads(content)
     picks = data.get("picks", [])
     if not picks:

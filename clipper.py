@@ -29,13 +29,13 @@ from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
                  review, audiogram, endscreen, moments as moments_mod)
 
 
-def _transcribe_local(source_path, provider, episode_id=None, output_root="output"):
+def _transcribe_local(source_path, provider, episode_id=None, output_root="output", usage_ctx=None):
     print(f"[0/5] Using local master: {source_path}")
     meta = fetch.fetch_local(source_path, episode_id=episode_id)
     print(f"      {meta['title']}  ({meta['duration_sec'] // 60}m {meta['duration_sec'] % 60}s)")
     print(f"[1/5] Transcribing via {provider}")
     try:
-        result = transcribe.transcribe(meta["audio_path"], provider=provider)
+        result = transcribe.transcribe(meta["audio_path"], provider=provider, usage_ctx=usage_ctx)
     except Exception as e:
         try:
             import whisperx  # noqa: F401
@@ -43,7 +43,7 @@ def _transcribe_local(source_path, provider, episode_id=None, output_root="outpu
             raise e          # no local fallback in the cloud — surface the real error
         if provider == "grok":
             print(f"      ! {e}. Falling back to local WhisperX...")
-            result = transcribe.transcribe(meta["audio_path"], provider="whisperx")
+            result = transcribe.transcribe(meta["audio_path"], provider="whisperx", usage_ctx=usage_ctx)
         else:
             raise
     path = os.path.join(output_root, f"{meta['id']}.transcript.json")
@@ -52,14 +52,14 @@ def _transcribe_local(source_path, provider, episode_id=None, output_root="outpu
     return path
 
 
-def _transcribe(url, provider, output_root="output"):
+def _transcribe(url, provider, output_root="output", usage_ctx=None):
     print(f"[0/5] Fetching audio: {url}")
     meta = fetch.fetch_audio(url)
     m, s = meta["duration_sec"] // 60, meta["duration_sec"] % 60
     print(f"      {meta['title']}  ({m}m {s}s)")
     print(f"[1/5] Transcribing via {provider}")
     try:
-        result = transcribe.transcribe(meta["audio_path"], provider=provider)
+        result = transcribe.transcribe(meta["audio_path"], provider=provider, usage_ctx=usage_ctx)
     except Exception as e:
         try:
             import whisperx  # noqa: F401
@@ -67,7 +67,7 @@ def _transcribe(url, provider, output_root="output"):
             raise e          # no local fallback in the cloud — surface the real error
         if provider == "grok":
             print(f"      ! {e}. Falling back to local WhisperX...")
-            result = transcribe.transcribe(meta["audio_path"], provider="whisperx")
+            result = transcribe.transcribe(meta["audio_path"], provider="whisperx", usage_ctx=usage_ctx)
         else:
             raise
     path = os.path.join(output_root, f"{meta['id']}.transcript.json")
@@ -80,7 +80,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
         series=None, end_screen=True, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
-        guest_name=None, moments=None):
+        guest_name=None, moments=None, usage_ctx=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -97,10 +97,10 @@ def run(url=None, provider="grok", transcript=None, source=None,
     # entirely: transcribe from the file and cut from it locally.
     _p("fetch", 0, "fetching + transcribing")
     if source_file:
-        tpath = transcript or _transcribe_local(source_file, provider, episode_id, output_root)
+        tpath = transcript or _transcribe_local(source_file, provider, episode_id, output_root, usage_ctx=usage_ctx)
         source = source or source_file        # cut locally from the master
     else:
-        tpath = transcript or _transcribe(url, provider, output_root)
+        tpath = transcript or _transcribe(url, provider, output_root, usage_ctx=usage_ctx)
     tdata = json.load(open(tpath))
 
     cpath = tpath.replace(".transcript.json", ".clips.json")
@@ -124,7 +124,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
         _p("detect", 35, "finding Kintsugi moments")
         print(f"[2/5] Detecting Kintsugi moments (top {count})"
               + ("" if use_llm else " (heuristic only)"))
-        result = detect.detect(tpath, use_llm=use_llm, top_n=count)
+        result = detect.detect(tpath, use_llm=use_llm, top_n=count, usage_ctx=usage_ctx)
         json.dump(result, open(cpath, "w"), indent=2)
         n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
         print(f"      {len(result['clips'])} moments ({n_ok} ok, "
@@ -143,7 +143,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             ep_url = f"https://www.youtube.com/watch?v={tdata.get('id')}"
             metadata.generate(result["clips"],
                               result.get("title") or tdata.get("title", ""), ep_url,
-                              guest_name=guest_name, series=series)
+                              guest_name=guest_name, series=series, usage_ctx=usage_ctx)
             json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
             n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
             print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
@@ -282,7 +282,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
 def render_clip(spec, url=None, source=None, words_all=None, series=None,
                 guest_name=None, reframe_mode="speaker", make_audiogram=True,
                 end_screen=True, index=0, output_root="output",
-                with_metadata=False, episode_title="", episode_url=""):
+                with_metadata=False, episode_title="", episode_url="", usage_ctx=None):
     """Cut + reframe + caption + brand ONE moment, returning a clip dict in the same
     shape as run()'s `clips[]` entries (clip_id, start, end, files, framing, ...).
 
@@ -314,7 +314,7 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
                     "archetype": spec.get("archetype", ""),
                     "why": spec.get("why", ""), "text": spec.get("text", ""),
                     "safety": spec.get("safety", "ok")}]
-            metadata.generate(one, episode_title, episode_url, guest_name=guest_name, series=series)
+            metadata.generate(one, episode_title, episode_url, guest_name=guest_name, series=series, usage_ctx=usage_ctx)
             meta = one[0].get("metadata", meta)
         except Exception as e:
             print(f"      ! metadata pack skipped: {str(e)[:160]}")
