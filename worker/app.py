@@ -627,7 +627,7 @@ def process_video_job(payload: dict):
 @app.function(image=image, timeout=900, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
 def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                      series: str = None, guest_name: str = None,
-                     reframe_mode: str = "speaker"):
+                     reframe_mode: str = "speaker", reframe_offset: float = 0.0):
     import json
     import sys
     import uuid
@@ -680,7 +680,8 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
             }
             rendered = clipper.render_clip(
                 spec, url=url, words_all=words_all, series=series, guest_name=guest_name,
-                reframe_mode=str(reframe_mode or "speaker"), index=index,
+                reframe_mode=str(reframe_mode or "speaker"),
+                reframe_offset=float(reframe_offset or 0.0), index=index,
                 output_root="/tmp/clipjob", with_metadata=False,
                 usage_ctx={"job_id": job_id, "source": "worker",
                            "episode_ref": outputs.get("episode_id") or job.get("episode_id")})
@@ -938,6 +939,7 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
             action, payload["job_id"], payload["clip_id"], payload.get("url"),
             payload.get("series"), payload.get("guest_name"),
             str(payload.get("reframe") or "speaker"),
+            float(payload.get("reframe_offset") or 0.0),
         )
         return {"accepted": True, "job_id": payload["job_id"],
                 "clip_id": payload["clip_id"], "action": action}

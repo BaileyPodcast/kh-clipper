@@ -34,6 +34,52 @@ W, H = 1080, 1920
 # `reframe` request values that mean "don't follow anyone, just centre-crop".
 _CENTRE_MODES = {"center", "centre", "static", "none", "off"}
 
+# Manual side anchors as a fraction of source width, for the two directable modes.
+# A KH interview is a standard side-by-side two-shot, so the left person sits around
+# 30% of the width and the right person around 70%. The producer picks the side when
+# auto speaker-tracking got it wrong; `offset` then fine-tunes it.
+_SIDE_ANCHOR = {"left": 0.30, "right": 0.70}
+
+# How far a nudge can bias the crop, as a fraction of source width (both directions).
+_MAX_OFFSET = 0.35
+
+
+def _probe_dims(src):
+    """(width, height) of the source video via ffprobe, or (0, 0) if it can't be read
+    (ffprobe missing, non-video input, etc.). Never raises — a failed probe just makes
+    the caller fall back to the centre/auto crop path."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", src],
+            capture_output=True, text=True)
+        w, h = r.stdout.strip().split("x")[:2]
+        return int(w), int(h)
+    except (ValueError, IndexError, OSError):
+        return 0, 0
+
+
+def _run_fit(w, h, src, out):
+    """Fit-both: show the WHOLE 16:9 frame inside the 9:16 canvas so both people stay in
+    shot. Scale the full frame to the target width and centre it vertically; fill the band
+    above and below with a blurred, zoomed copy of the same frame (the standard 'fit' look,
+    no dead bars). Crops no one out, so it's the last-resort framing that always yields a
+    usable clip when a tight crop would drop the host or guest."""
+    fc = (
+        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},boxblur=luma_radius=24:luma_power=1[bg];"
+        f"[0:v]scale={w}:-2[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]"
+    )
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-i", src, "-filter_complex", fc,
+         "-map", "[v]", "-map", "0:a?",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+         "-c:a", "copy", "-movflags", "+faststart", out],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr[-1200:])
+
 
 def _wants_face(mode):
     """Map the studio `reframe` field to whether we run speaker-follow. Unknown/empty
@@ -133,14 +179,43 @@ def _track_vf(w, h, src_w, src_h, track):
     return f"crop=w={crop_w}:h={src_h}:x={_pan_expr(kf)}:y=0,scale={w}:{h},setsar=1"
 
 
-def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_face=None):
+def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_face=None,
+            offset=0.0):
     """Reframe 16:9 -> 9:16. Returns the framing flag: "ok" or "review".
 
-    `mode` is the studio `reframe` request ("speaker" follows the speaker, "center"
-    centre-crops). `use_face` overrides that decision when set explicitly (CLI)."""
+    `mode` is the studio `reframe` request:
+      - "speaker" (default) -> follow the active speaker (face-follow + smoothed pan).
+      - "center"/"centre"/… -> plain centre-crop, no face work.
+      - "left"/"right"      -> a directable crop anchored on the left/right person (a
+                               standard side-by-side two-shot). No face detection: this
+                               is the producer's override for when auto got it wrong, so
+                               it does exactly what it's told.
+      - "fit"               -> show the whole frame so both people stay in shot.
+    `offset` nudges the crop left (negative) or right (positive) as a fraction of source
+    width, applied to speaker/center/left/right (ignored by "fit"). `use_face` overrides
+    the speaker/center decision when set explicitly (CLI)."""
     w, h = frame
+    m = str(mode or "speaker").strip().lower()
+    off = max(-_MAX_OFFSET, min(_MAX_OFFSET, float(offset or 0.0)))
+
+    # Fit-both: whole frame inside 9:16, both people shown. No cropping, no face work.
+    if m == "fit":
+        _run_fit(w, h, src, out)
+        return "ok"
+
+    # Manual side / nudge: a deterministic anchored crop the PRODUCER directs. It does
+    # not use face detection on purpose — this is the override for when auto got it
+    # wrong, so it must do exactly what it's told. `off` biases the anchor left/right.
+    if m in _SIDE_ANCHOR or (off and m in _CENTRE_MODES):
+        sw, sh = _probe_dims(src)
+        if sw and sh:
+            anchor = _SIDE_ANCHOR.get(m, 0.5) + off
+            _run_ff(_follow_vf(w, h, sw, sh, anchor * sw), src, out)
+            return "ok"
+        # probe failed -> fall through to the centre/auto paths below.
+
     if use_face is None:
-        use_face = _wants_face(mode)
+        use_face = _wants_face(m)
 
     if not use_face:
         _run_ff(_centre_vf(w, h), src, out)
@@ -169,6 +244,12 @@ def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_fa
         # Two comparable faces — don't guess. Centre-crop and let a producer check.
         _run_ff(_centre_vf(w, h), src, out)
         return "review"
+
+    # A producer nudge on the auto crop: bias the anchor and hold it static (a moving
+    # pan fighting a manual offset would just look like drift). _follow_vf clamps x.
+    if off:
+        _run_ff(_follow_vf(w, h, info["width"], info["height"], cx + off * info["width"]), src, out)
+        return "ok"
 
     # single or follow: pan with the speaker over time, falling back to a static crop
     # centred on the guest if we can't build a pan. A malformed pan expression must

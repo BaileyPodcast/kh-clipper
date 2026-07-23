@@ -296,8 +296,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
 
 
 def render_clip(spec, url=None, source=None, words_all=None, series=None,
-                guest_name=None, reframe_mode="speaker", make_audiogram=True,
-                end_screen=True, index=0, output_root="output",
+                guest_name=None, reframe_mode="speaker", reframe_offset=0.0,
+                make_audiogram=True, end_screen=True, index=0, output_root="output",
                 with_metadata=False, episode_title="", episode_url="", usage_ctx=None):
     """Cut + reframe + caption + brand ONE moment, returning a clip dict in the same
     shape as run()'s `clips[]` entries (clip_id, start, end, files, framing, ...).
@@ -337,7 +337,8 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     banner = meta.get("banner_hook")
 
     vertical = os.path.join(final_dir, f"{cid}_v.mp4")
-    framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode)
+    framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode,
+                              offset=reframe_offset)
     words = caption.clip_words(words_all or [], start, end)
     outs = caption.finish(vertical, words, os.path.join(final_dir, cid), banner=banner)
     if end_screen and endscreen.available():
