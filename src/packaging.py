@@ -127,7 +127,11 @@ TITLE_MAX = 100
 TAGS_LIMIT = 500
 
 FULL_EPISODE_TODO = "→ PASTE FULL EPISODE LINK"
-PODCAST_TODO = "→ ADD SPOTIFY / APPLE LINK"
+# The KH podcast show links (canonical, tracking params stripped). The full
+# episode YouTube link is filled by the app at upload time (the worker only has
+# the source/Drive id, which is not a real YouTube video).
+KH_SPOTIFY_SHOW = "https://open.spotify.com/show/033u5uGaKw7qEmQQll4H8P"
+KH_APPLE_SHOW = "https://podcasts.apple.com/au/channel/kintsugi-heroes-originals/id6776646986"
 
 
 def series_meta(slug):
@@ -243,12 +247,11 @@ def compose_description(slug, hook_seo_line, context, hashtags, full_episode_url
     meta = series_meta(slug)
     is_main_feed = meta is SERIES["kintsugi-heroes"]
     full_url = (full_episode_url or "").strip() or FULL_EPISODE_TODO
-    podcast = (podcast_url or "").strip() or PODCAST_TODO
 
     parts = [
         (hook_seo_line or "").strip(),
         (context or "").strip(),
-        f"🎙️ Watch the full episode: {full_url}\n🎧 Listen on Spotify/Apple: {podcast}",
+        f"🎙️ Watch the full episode: {full_url}\n🎧 Spotify: {KH_SPOTIFY_SHOW}\n🍎 Apple Podcasts: {KH_APPLE_SHOW}",
         f"About Kintsugi Heroes:\n{ABOUT_KH}",
     ]
     if not is_main_feed:

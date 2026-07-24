@@ -154,7 +154,11 @@ def run(url=None, provider="grok", transcript=None, source=None,
     if use_llm and result["clips"]:
         _p("metadata", 50, "writing metadata packs")
         try:
-            ep_url = f"https://www.youtube.com/watch?v={tdata.get('id')}"
+            # The source id is a Drive/file id, not a YouTube video id, so we do
+            # NOT build a watch URL from it (that link is dead). Leave it blank so
+            # the description carries the placeholder; the app fills the real
+            # published YouTube link at upload time.
+            ep_url = ""
             metadata.generate(result["clips"],
                               result.get("title") or tdata.get("title", ""), ep_url,
                               guest_name=guest_name, series=series, usage_ctx=usage_ctx)

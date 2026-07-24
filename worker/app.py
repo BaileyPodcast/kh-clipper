@@ -656,7 +656,10 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
         guest_name = guest_name or outputs.get("guest_name")
         series = series or outputs.get("series")
         url = url or job.get("url")
-        episode_url = f"https://www.youtube.com/watch?v={outputs.get('episode_id') or job.get('episode_id') or ''}"
+        # The episode_id is a Drive/file id, not a YouTube video id, so a watch
+        # URL built from it is dead. Leave blank (placeholder in the description);
+        # the app fills the real published YouTube link at upload time.
+        episode_url = ""
         episode_title = outputs.get("title") or ""
 
         # Word timings drive the captions for both actions — load the persisted transcript.
