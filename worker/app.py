@@ -19,7 +19,7 @@ Deploy:
         WORKER_TOKEN=<a-long-random-shared-token> \
         GOOGLE_OAUTH_CLIENT_ID=<client-id> \
         GOOGLE_OAUTH_CLIENT_SECRET=<client-secret>
-    modal secret create anthropic ANTHROPIC_API_KEY=sk-ant-...   # Shorts copy (Brief 3); same key as the app
+    modal secret create KH-clipper-worker ANTHROPIC_API_KEY=sk-ant-...   # Shorts copy (Brief 3); same key as the app
     modal deploy worker/app.py
     # -> prints the web endpoint URL. Put it + WORKER_TOKEN in Studio's server env.
 
@@ -68,9 +68,11 @@ COOKIE_SECRET = modal.Secret.from_name("yt-cookies")
 # xAI key in its own secret too — single-value, easy to set/rotate. Listed LAST so its
 # XAI_API_KEY overrides any stale value in kh-shorts.
 XAI_SECRET = modal.Secret.from_name("xai")
-# Anthropic key for the Shorts copy pass (Brief 3). Same key as the app (one bill);
-# create with:  modal secret create anthropic ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_SECRET = modal.Secret.from_name("anthropic")
+# Anthropic key for the Shorts copy pass (Brief 3). Same key as the app (one bill).
+# The Modal secret is named `KH-clipper-worker` and must hold ANTHROPIC_API_KEY=sk-ant-...
+# (src/metadata.py reads os.environ["ANTHROPIC_API_KEY"]). Create/edit it in the Modal
+# dashboard, or:  modal secret create KH-clipper-worker ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_SECRET = modal.Secret.from_name("KH-clipper-worker")
 
 CONTENT_TYPES = {".mp4": "video/mp4", ".md": "text/markdown", ".json": "application/json"}
 
