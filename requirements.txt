@@ -25,3 +25,6 @@ mediapipe
 # audio-reactive waveform envelope. numpy also ships with mediapipe.
 pillow
 numpy
+
+# Testing
+pytest
