@@ -69,7 +69,12 @@ suffix, a few words). A real curiosity gap, never clickbait, never a banned hype
 Lead with the person, not the diagnosis. Would the guest feel safe seeing this?
 - hook_seo_line: ONE human sentence under 150 characters carrying the emotional hook \
 AND 2 to 3 searchable keywords (the clip topic, "Kintsugi Heroes", the series name or \
-"Australian" where natural). Never keyword-stuffed.
+"Australian" where natural), all woven into that ONE sentence's own grammar. Never \
+keyword-stuffed, and never bolt "Kintsugi Heroes" on as a second, bare sentence \
+fragment with no connection to the hook (wrong: "Karl Germann refused to stay in a \
+toxic workplace. Kintsugi Heroes." — right: "Karl Germann refused to stay in a toxic \
+workplace, a Kintsugi Heroes story about walking away."). If a keyword cannot fit the \
+sentence naturally, drop it rather than tacking it on.
 - context: 2 to 3 natural sentences from the transcript. Who, what, why it matters. \
 Lead with the person and the turning point, no spoilers of the full episode.
 - primary_topic: the single best topic for THIS clip, from: {", ".join(packaging.TOPIC_TAGS.keys())}.
