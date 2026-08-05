@@ -141,6 +141,23 @@ ANIMATION = {
         "end_scale": 1.04,
     },
 
+    # Wave 2 — KH Quote Card intro (Remotion only; the libass path has no
+    # equivalent). The clip's hook line (the same text the on-screen banner
+    # already carries) opens as a full-bleed typographic card BEFORE the
+    # footage cuts in, instead of overlaid on top of it. `enabled` here is a
+    # GLOBAL kill-switch (same role as punch_in's) — the actual per-clip
+    # choice to use it is a separate opt-in the caller passes explicitly
+    # (default off, same "capability exists, opt in per call" pattern
+    # caption_style itself uses), not driven by this flag alone.
+    # Reuses `presets[name]["fade_ms"]` for its fade and `presets[name]["pop"]`
+    # to decide whether the entrance also drifts/scales in (standard) or is a
+    # plain fade only (calm) — no separate preset dict needed.
+    "quote_card_intro": {
+        "enabled": True,
+        "duration_sec": 1.5,
+        "drift_px": 24,          # standard-preset entrance drift distance
+    },
+
     # 1.5 — presets. `standard` is every effect above at full energy; `calm`
     # is trauma-informed: fades only, no pop, no scale, no zoom, a longer,
     # gentler fade. Selected automatically from the clip's safety rating.

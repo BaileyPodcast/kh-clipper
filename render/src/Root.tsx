@@ -1,16 +1,19 @@
 /**
  * KH Clipper — Wave 2 (KH-MGX-001) Remotion entry point.
  *
- * Two compositions: KHKinetic (Shorts captions, unchanged from the first
- * Wave 2 PR) and KHAudiogramV2 (the audiogram follow-up template, added
- * here). calculateMetadata resolves the real duration/fps/frame from the
- * input props (render-cli.mjs already knows these from ffprobe, same as
- * Wave 1's caption.py `_duration()`/`_fps()`) so Remotion never has to
- * probe the video itself.
+ * Two compositions: KHKinetic (Shorts captions) and KHAudiogramV2 (the
+ * audiogram follow-up template). calculateMetadata resolves the real
+ * duration/fps/frame from the input props (render-cli.mjs already knows
+ * these from ffprobe, same as Wave 1's caption.py `_duration()`/`_fps()`) so
+ * Remotion never has to probe the video itself. When KHKinetic's Quote Card
+ * intro is on (`props.quoteCardIntro`), the TOTAL composition length is the
+ * video's own duration PLUS the intro card's — `getIntroFrames()` (from
+ * KHKinetic.tsx) is the one place that math lives, so this can never drift
+ * from what the component itself actually lays out.
  */
 import React from "react";
 import { Composition, registerRoot } from "remotion";
-import { KHKinetic } from "./KHKinetic";
+import { KHKinetic, getIntroFrames } from "./KHKinetic";
 import { KHAudiogramV2 } from "./KHAudiogramV2";
 import type { KhKineticProps } from "./brand-types";
 import type { AudiogramV2Props } from "./audiogram-types";
@@ -26,6 +29,7 @@ const DEFAULT_PROPS: KhKineticProps = {
   height: 1920,
   fps: 30,
   durationInFrames: 150,
+  quoteCardIntro: false,
   brand: {
     colours: {
       gold: "#ED9A1F",
@@ -52,6 +56,7 @@ const DEFAULT_PROPS: KhKineticProps = {
       captionBands: { defaultMarginVPx: 380, raisedMarginVPx: 620, lowFaceThreshold: 0.62 },
       bannerBands: { defaultMarginVPx: 360, midMarginVPx: 520, highFaceThreshold: 0.2 },
       punchIn: { enabled: true, startScale: 1.0, endScale: 1.04 },
+      quoteCardIntro: { enabled: true, durationSec: 1.5, driftPx: 24 },
       presets: {
         standard: { pop: true, highlight: true, punchIn: true, fadeMs: 60 },
         calm: { pop: false, highlight: false, punchIn: false, fadeMs: 220 },
@@ -118,12 +123,15 @@ export const RemotionRoot: React.FC = () => {
         width={DEFAULT_PROPS.width}
         height={DEFAULT_PROPS.height}
         defaultProps={DEFAULT_PROPS}
-        calculateMetadata={async ({ props }) => ({
-          durationInFrames: props.durationInFrames,
-          fps: props.fps,
-          width: props.width,
-          height: props.height,
-        })}
+        calculateMetadata={async ({ props }) => {
+          const introFrames = getIntroFrames(props.quoteCardIntro, props.banner, props.brand, props.fps);
+          return {
+            durationInFrames: props.durationInFrames + introFrames,
+            fps: props.fps,
+            width: props.width,
+            height: props.height,
+          };
+        }}
       />
       <Composition
         id="KHAudiogramV2"
