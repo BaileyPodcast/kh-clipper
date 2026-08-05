@@ -19,6 +19,14 @@
  *       [--quote-card-intro]   (Wave 2: hook line as a full-bleed card
  *                               before the footage cuts in; needs
  *                               --banner set)
+ *       [--variant shorts|universal] [--no-end-screen-cta]
+ *                               (Wave 2: KH End Screen — an animated CTA
+ *                               overlay on the clip's own final seconds, on
+ *                               by default; --variant picks arrows-at-
+ *                               native-UI ["shorts", the default] vs
+ *                               branded-text-only ["universal"];
+ *                               --no-end-screen-cta opts a single render
+ *                               out of it entirely)
  *
  *   --composition audiogram-v2 (new, KH Audiogram v2)
  *     node render-cli.mjs --composition audiogram-v2 \
@@ -154,6 +162,10 @@ async function runKinetic(args) {
     // off by default. calculateMetadata (Root.tsx) extends the composition's
     // total length to cover it; no separate duration math needed here.
     quoteCardIntro: Boolean(args["quote-card-intro"]),
+    // Wave 2 — KH End Screen: on by default (parity with classic's own
+    // always-on CTA, src/cta.py) — --no-end-screen-cta is the one opt-out.
+    variant: (args.variant === "universal" ? "universal" : "shorts"),
+    endScreenCta: !args["no-end-screen-cta"],
   };
 
   const t0 = Date.now();

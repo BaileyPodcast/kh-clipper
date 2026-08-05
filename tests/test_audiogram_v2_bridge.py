@@ -24,9 +24,10 @@ from src.audiogram import NBARS
 
 def test_export_brand_still_has_kinetic_shape_unchanged():
     # The audiogramV2 addition must not disturb the KHKinetic export shape
-    # locked by tests/test_kinetic_bridge.py.
+    # locked by tests/test_kinetic_bridge.py. "cta" was added by the KH End
+    # Screen follow-up (reuses brand.CTA verbatim) — also expected here.
     data = export_brand.build()
-    assert set(data.keys()) == {"colours", "fonts", "caption", "animation", "audiogramV2"}
+    assert set(data.keys()) == {"colours", "fonts", "caption", "animation", "cta", "audiogramV2"}
 
 
 def test_export_brand_audiogram_v2_camel_case_matches_render_types():

@@ -152,10 +152,36 @@ def build() -> dict:
                 "durationSec": anim["quote_card_intro"]["duration_sec"],
                 "driftPx": anim["quote_card_intro"]["drift_px"],
             },
+            "endScreen": {
+                "enabled": anim["end_screen"]["enabled"],
+                "windowSec": anim["end_screen"]["window_sec"],
+                "staggerMs": anim["end_screen"]["stagger_ms"],
+            },
             "presets": {
                 "standard": preset("standard"),
                 "calm": preset("calm"),
             },
+        },
+        # Wave 2 — KH End Screen reuses brand.CTA verbatim (never a second copy
+        # of the copy/targets already locked for the classic libass CTA,
+        # src/cta.py). Colours are NOT re-exported here — CTA's pill/text/
+        # accent colours are the same darkOlive/creamWhite/gold already in
+        # `colours` above, so the render layer reads those directly.
+        "cta": {
+            "copy": {
+                "subscribeSoft": brand.CTA["copy"]["subscribe_soft"],
+                "subscribe": brand.CTA["copy"]["subscribe"],
+                "fullEpisode": brand.CTA["copy"]["full_episode"],
+                "related": brand.CTA["copy"]["related"],
+                "handle": brand.CTA["copy"]["handle"],
+            },
+            "shortsTargets": {
+                "subscribeBtn": brand.CTA["shorts_targets"]["subscribe_btn"],
+                "channelProfile": brand.CTA["shorts_targets"]["channel_profile"],
+                "relatedLink": brand.CTA["shorts_targets"]["related_link"],
+            },
+            "pillOpacity": brand.CTA["pill_opacity"],
+            "fontSize": brand.CTA["font_size"],
         },
         "audiogramV2": _build_audiogram_v2(),
     }

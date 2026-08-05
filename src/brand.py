@@ -158,6 +158,24 @@ ANIMATION = {
         "drift_px": 24,          # standard-preset entrance drift distance
     },
 
+    # Wave 2 — KH End Screen (Remotion only; the libass path has its own,
+    # separate always-on CTA system, src/cta.py, unaffected by this). An
+    # animated CTA overlay over the FINAL SECONDS of the clip — NOT appended
+    # after (that is the retired src/endscreen.py pattern); the overlay
+    # occupies the tail of the composition's own existing duration, so total
+    # duration is unaffected (unlike quote_card_intro above, which prepends
+    # and genuinely extends it). `enabled` is a GLOBAL kill-switch (same role
+    # as punch_in's/quote_card_intro's). Unlike quote_card_intro, the
+    # per-clip choice defaults ON (`src.kinetic.finish(end_screen_cta=True)`)
+    # so the kinetic style stays at parity with classic's own always-on CTA
+    # instead of being a downgrade — see KH-MGX-001 Wave 2 End Screen PR body
+    # for the reasoning.
+    "end_screen": {
+        "enabled": True,
+        "window_sec": 3.0,      # tail window the overlay occupies ("final ~2-3 seconds")
+        "stagger_ms": 500,      # delay before the 2nd message group pops in after the 1st
+    },
+
     # 1.5 — presets. `standard` is every effect above at full energy; `calm`
     # is trauma-informed: fades only, no pop, no scale, no zoom, a longer,
     # gentler fade. Selected automatically from the clip's safety rating.
@@ -300,6 +318,12 @@ AUDIOGRAM_V2 = {
 # Two variants: "shorts" (arrows point at YouTube's native buttons) and
 # "universal" (branded text only, for Reels/TikTok where buttons differ).
 # Style: olive pill, cream text, gold arrows/emphasis. Archivo SemiBold.
+#
+# Reused verbatim (copy + shorts_targets) by the Wave 2 KH End Screen
+# Remotion template (src/kinetic.py, ANIMATION["end_screen"] above) so the
+# kinetic and classic CTAs stay on the same message and point at the same
+# native-UI positions — export_brand.py exports the fields below as-is,
+# never a second copy.
 # ----------------------------------------------------------------------
 CTA = {
     "font": FONTS["heading"]["family"],          # Archivo SemiBold

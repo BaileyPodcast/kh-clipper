@@ -9,7 +9,10 @@
  * intro is on (`props.quoteCardIntro`), the TOTAL composition length is the
  * video's own duration PLUS the intro card's — `getIntroFrames()` (from
  * KHKinetic.tsx) is the one place that math lives, so this can never drift
- * from what the component itself actually lays out.
+ * from what the component itself actually lays out. The End Screen CTA
+ * overlay (`props.endScreenCta`, default on) needs NO equivalent change
+ * here — it occupies the TAIL of the video's own existing duration rather
+ * than extending it, so `durationInFrames` is untouched by it either way.
  */
 import React from "react";
 import { Composition, registerRoot } from "remotion";
@@ -30,6 +33,8 @@ const DEFAULT_PROPS: KhKineticProps = {
   fps: 30,
   durationInFrames: 150,
   quoteCardIntro: false,
+  variant: "shorts",
+  endScreenCta: true,
   brand: {
     colours: {
       gold: "#ED9A1F",
@@ -57,10 +62,27 @@ const DEFAULT_PROPS: KhKineticProps = {
       bannerBands: { defaultMarginVPx: 360, midMarginVPx: 520, highFaceThreshold: 0.2 },
       punchIn: { enabled: true, startScale: 1.0, endScale: 1.04 },
       quoteCardIntro: { enabled: true, durationSec: 1.5, driftPx: 24 },
+      endScreen: { enabled: true, windowSec: 3.0, staggerMs: 500 },
       presets: {
         standard: { pop: true, highlight: true, punchIn: true, fadeMs: 60 },
         calm: { pop: false, highlight: false, punchIn: false, fadeMs: 220 },
       },
+    },
+    cta: {
+      copy: {
+        subscribeSoft: "Subscribe for more real stories",
+        subscribe: "Don't forget to subscribe",
+        fullEpisode: "Listen to the full episode",
+        related: "Full episode in the linked video below",
+        handle: "@kintsugiheroes",
+      },
+      shortsTargets: {
+        subscribeBtn: [430, 1715],
+        channelProfile: [150, 1715],
+        relatedLink: [300, 1830],
+      },
+      pillOpacity: 0.85,
+      fontSize: 72,
     },
   },
 };

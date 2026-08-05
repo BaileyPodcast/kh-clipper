@@ -25,13 +25,20 @@ def test_export_brand_shape_has_no_ass_values():
     data = export_brand.build()
     # `audiogramV2` was added by the KH Audiogram v2 follow-up
     # (tests/test_audiogram_v2_bridge.py locks its own shape down) — the
-    # KHKinetic-relevant top-level keys below are otherwise unchanged.
-    assert {"colours", "fonts", "caption", "animation"} <= set(data.keys())
+    # KHKinetic-relevant top-level keys below are otherwise unchanged. "cta"
+    # (Wave 2 — KH End Screen, reuses brand.CTA copy/targets verbatim) IS
+    # required here, since KHKinetic.tsx's own EndScreenCta reads it.
+    assert {"colours", "fonts", "caption", "animation", "cta"} <= set(data.keys())
     # hex colours (web), never ASS &HAABBGGRR values
     for v in data["colours"].values():
         assert v.startswith("#") and len(v) == 7
     assert data["animation"]["presets"]["calm"]["pop"] is False
     assert data["animation"]["presets"]["standard"]["pop"] is True
+    # cta: plain px/text, never an ASS &HAABBGGRR colour
+    assert data["cta"]["copy"]["subscribe"] == "Don't forget to subscribe"
+    assert data["cta"]["shortsTargets"]["subscribeBtn"] == [430, 1715]
+    for v in [str(x) for x in data["cta"]["copy"].values()]:
+        assert not v.startswith("&H")
 
 
 def test_export_brand_writes_a_real_file(tmp_path):
@@ -52,6 +59,10 @@ def test_export_brand_camel_case_matches_render_types():
     assert "captionBands" in data["animation"]
     assert "lowFaceThreshold" in data["animation"]["captionBands"]
     assert "headingFile" in data["fonts"]
+    assert "windowSec" in data["animation"]["endScreen"]
+    assert "staggerMs" in data["animation"]["endScreen"]
+    assert "fullEpisode" in data["cta"]["copy"]
+    assert "channelProfile" in data["cta"]["shortsTargets"]
 
 
 def test_export_brand_quote_card_intro_shape():

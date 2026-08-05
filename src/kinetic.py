@@ -62,7 +62,7 @@ def _fps(path) -> float:
 
 def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="ok",
            faceband=None, frame=(1080, 1920), variants=("shorts", "universal"),
-           quote_card_intro=False):
+           quote_card_intro=False, end_screen_cta=True):
     """Render the KH Kinetic template. Mirrors src.caption.finish()'s call
     shape and return value (a list of written file paths) so clipper.py can
     branch between the two with no other change downstream.
@@ -71,14 +71,20 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
     (`banner`) opens as a full-bleed typographic card before the footage
     cuts in, instead of overlaid on top of it. No-op without a `banner`.
 
-    v1 (this PR) has no per-variant CTA differences yet (Remotion CTA end
-    cards, the arrows-vs-branded-text split libass's cta.py does, are a later
-    Wave 2 template) — so `_shorts`/`_universal` would be byte-identical.
-    Rendering the same composition twice would double render cost for no
-    difference, so this renders ONCE and copies the result to every requested
-    variant name, keeping the same multi-file contract without paying for it
-    twice. Flagged, not silently hidden: when the Wave 2 CTA template lands,
-    this becomes a real per-variant render like caption.finish()'s.
+    `end_screen_cta` (Wave 2 — KH End Screen, default ON): an animated CTA
+    overlay on the clip's own final seconds — arrows-at-native-UI for the
+    "shorts" variant, branded text/handle for "universal". Default ON so
+    `caption_style="kinetic"` stays at parity with classic's own always-on
+    CTA (src/cta.py) rather than being a downgrade; pass False to opt a
+    single render out.
+
+    With `end_screen_cta` on, "shorts" and "universal" are genuinely
+    different renders now (arrows vs branded text/handle) — each requested
+    variant gets its own render. With it off every variant is still
+    byte-identical (no CTA difference — the same "no per-variant difference
+    yet" case the original v1 KH Kinetic PR's own comment described), so
+    this keeps the original render-once-and-copy cost optimisation for that
+    case rather than paying for N identical renders.
 
     Raises RuntimeError on failure (never partially writes a "finished" file
     the caller would upload) — mirrors caption.finish()'s own contract."""
@@ -102,13 +108,11 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
             with open(faceband_path, "w") as f:
                 json.dump(faceband, f)
 
-        rendered = os.path.join(tmp, "kinetic.mp4")
-        cmd = [
+        base_cmd = [
             "node", RENDER_CLI,
             "--video", clip_in,
             "--words", words_path,
             "--brand", brand_path,
-            "--out", rendered,
             "--duration", str(dur),
             "--fps", str(fps),
             "--width", str(frame[0]),
@@ -116,35 +120,48 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
             "--safety", safety or "ok",
         ]
         if highlight_word:
-            cmd += ["--highlight", highlight_word]
+            base_cmd += ["--highlight", highlight_word]
         if banner:
-            cmd += ["--banner", banner]
+            base_cmd += ["--banner", banner]
         if faceband_path:
-            cmd += ["--faceband", faceband_path]
+            base_cmd += ["--faceband", faceband_path]
         if quote_card_intro:
-            cmd += ["--quote-card-intro"]
+            base_cmd += ["--quote-card-intro"]
+        if not end_screen_cta:
+            base_cmd += ["--no-end-screen-cta"]
         env = dict(os.environ)
         browser = os.environ.get("REMOTION_BROWSER_EXECUTABLE")
         if browser:
             env["REMOTION_BROWSER_EXECUTABLE"] = browser
 
-        t0 = time.time()
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=RENDER_DIR, env=env)
-        if r.returncode != 0:
-            raise RuntimeError(r.stderr[-1600:] or r.stdout[-1600:])
-        render_s = time.time() - t0
+        # end_screen_cta on -> shorts/universal genuinely differ, so each
+        # variant renders separately. off -> still identical either way, so
+        # render ONCE (the original v1 cost optimisation) and copy below.
+        render_variants = list(variants) if end_screen_cta else [variants[0]]
+        rendered_paths = {}
+        total_render_s = 0.0
+        for variant in render_variants:
+            rendered = os.path.join(tmp, f"kinetic_{variant}.mp4")
+            cmd = base_cmd + ["--out", rendered, "--variant", variant]
+            t0 = time.time()
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=RENDER_DIR, env=env)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr[-1600:] or r.stdout[-1600:])
+            total_render_s += time.time() - t0
+            rendered_paths[variant] = rendered
 
         outs = []
         for variant in variants:
+            src_variant = variant if end_screen_cta else render_variants[0]
             out = f"{out_base}_{variant}.mp4"
             os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-            with open(rendered, "rb") as src_f, open(out, "wb") as dst_f:
+            with open(rendered_paths[src_variant], "rb") as src_f, open(out, "wb") as dst_f:
                 dst_f.write(src_f.read())
             outs.append(out)
-        # v1 render-cost note (Wave 2 acceptance criterion) — wall-clock render
-        # time for the one real render, not per copied variant.
+        # v1/v2 render-cost note (Wave 2 acceptance criterion) — wall-clock
+        # render time for the real render(s) only, never per copied variant.
         print(f"  finished {len(outs)} kinetic export(s) from {os.path.basename(out_base)} "
-              f"({render_s:.1f}s render)")
+              f"({total_render_s:.1f}s render, {len(rendered_paths)} unique render(s))")
     return outs
 
 
@@ -159,13 +176,16 @@ def main():
     ap.add_argument("--banner", default=None)
     ap.add_argument("--safety", default="ok")
     ap.add_argument("--quote-card-intro", action="store_true", dest="quote_card_intro")
+    ap.add_argument("--no-end-screen-cta", action="store_false", dest="end_screen_cta",
+                    default=True, help="Wave 2: opt this render out of the tail-window CTA overlay")
     args = ap.parse_args()
     from src.caption import clip_words
     words_all = json.load(open(args.transcript)).get("words", [])
     words = clip_words(words_all, args.start, args.end)
     out_base = args.out or os.path.splitext(args.clip)[0]
     finish(args.clip, words, out_base, highlight_word=args.highlight,
-           banner=args.banner, safety=args.safety, quote_card_intro=args.quote_card_intro)
+           banner=args.banner, safety=args.safety, quote_card_intro=args.quote_card_intro,
+           end_screen_cta=args.end_screen_cta)
     print("done")
 
 
