@@ -18,11 +18,80 @@ DEFAULT_OUT = os.path.join(
 )
 
 
+def _build_audiogram_v2() -> dict:
+    """Curated, camelCase export of brand.AUDIOGRAM_V2 — read by
+    render/src/KHAudiogramV2.tsx via brand.json's `audiogramV2` key. Kept as
+    its own function (rather than inlined into build()) so the two templates'
+    export logic stay easy to read/test independently."""
+    av2 = brand.AUDIOGRAM_V2
+    fonts = av2["fonts"]
+    bars = av2["bars"]
+    progress = av2["progress"]
+    cap = av2["caption_transition"]
+    layout = av2["layout"]
+
+    def font(key):
+        f = fonts[key]
+        return {"family": f["family"], "file": f["file"]}
+
+    def preset(name):
+        p = av2["presets"][name]
+        return {
+            "barEntranceSpring": p["bar_entrance_spring"],
+            "progressGlow": p["progress_glow"],
+        }
+
+    def format_layout(key):
+        f = layout[key]
+        out = {
+            "padX": f["pad_x"], "padY": f["pad_y"],
+            "logoH": f["logo_h"], "eyebrowSize": f["eyebrow_size"],
+            "captionSize": f["caption_size"], "waveformH": f["waveform_h"],
+            "barW": f["bar_w"], "barGap": f["bar_gap"],
+        }
+        if f.get("caption_max_w_frac") is not None:
+            out["captionMaxWFrac"] = f["caption_max_w_frac"]
+        if f.get("caption_max_w_cqw") is not None:
+            out["captionMaxWCqw"] = f["caption_max_w_cqw"]
+        return out
+
+    return {
+        "fonts": {
+            "headingBold": font("heading_bold"),
+            "headingXBold": font("heading_xbold"),
+            "body": font("body"),
+            "mono": font("mono"),
+        },
+        "bars": {
+            "count": bars["count"],
+            "minScale": bars["min_scale"],
+            "entranceMs": bars["entrance_ms"],
+            "entranceStaggerMs": bars["entrance_stagger_ms"],
+            "springDamping": bars["spring_damping"],
+            "springMass": bars["spring_mass"],
+            "calmFadeMs": bars["calm_fade_ms"],
+        },
+        "progress": {"fillGlowMs": progress["fill_glow_ms"]},
+        "captionTransition": {"fadeMs": cap["fade_ms"], "calmFadeMs": cap["calm_fade_ms"]},
+        "presets": {"standard": preset("standard"), "calm": preset("calm")},
+        "layout": {
+            "wide": format_layout("wide"),
+            "tall": format_layout("tall"),
+            "square": format_layout("square"),
+            "barRadius": layout["bar_radius"],
+            "centreGap": layout["centre_gap"],
+            "progressH": layout["progress_h"],
+            "progressGap": layout["progress_gap"],
+        },
+    }
+
+
 def build() -> dict:
     """Curated, camelCase, WEB-friendly shape (hex colours, plain px/ms/percent
     numbers) — never the ASS-specific values (&HAABBGGRR, ASS margin
     conventions) those are libass-only. Every field here is read by
-    render/src/KHKinetic.tsx; nothing on the React side is hardcoded."""
+    render/src/KHKinetic.tsx (top-level keys) or render/src/KHAudiogramV2.tsx
+    (`audiogramV2`); nothing on the React side is hardcoded."""
     c = brand.COLOURS
     anim = brand.ANIMATION
 
@@ -78,6 +147,11 @@ def build() -> dict:
                 "startScale": anim["punch_in"]["start_scale"],
                 "endScale": anim["punch_in"]["end_scale"],
             },
+            "quoteCardIntro": {
+                "enabled": anim["quote_card_intro"]["enabled"],
+                "durationSec": anim["quote_card_intro"]["duration_sec"],
+                "driftPx": anim["quote_card_intro"]["drift_px"],
+            },
             "endScreen": {
                 "enabled": anim["end_screen"]["enabled"],
                 "windowSec": anim["end_screen"]["window_sec"],
@@ -109,6 +183,7 @@ def build() -> dict:
             "pillOpacity": brand.CTA["pill_opacity"],
             "fontSize": brand.CTA["font_size"],
         },
+        "audiogramV2": _build_audiogram_v2(),
     }
 
 

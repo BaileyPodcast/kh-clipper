@@ -51,9 +51,14 @@ export type BrandAnimation = {
     startScale: number;
     endScale: number;
   };
+  quoteCardIntro: {
+    enabled: boolean;
+    durationSec: number;
+    driftPx: number;
+  };
   // Wave 2 — KH End Screen: the tail-window CTA overlay's own timing knobs.
-  // `enabled` is the global kill-switch (mirrors punchIn's); the per-clip
-  // opt-out is a separate boolean, `KhKineticProps.endScreenCta`.
+  // `enabled` is the global kill-switch (mirrors punchIn's/quoteCardIntro's);
+  // the per-clip opt-out is a separate boolean, `KhKineticProps.endScreenCta`.
   endScreen: {
     enabled: boolean;
     windowSec: number;
@@ -125,7 +130,8 @@ export type KhKineticProps = {
   width: number;
   height: number;
   fps: number;
-  durationInFrames: number;
+  durationInFrames: number; // the VIDEO's own duration — never includes the intro
+  quoteCardIntro: boolean; // opt-in per render; off by default (see Root.tsx defaultProps)
   // Wave 2 — KH End Screen. `variant` picks which CTA flavour renders (only
   // matters when endScreenCta is on): "shorts" points gold arrows at
   // YouTube's native Shorts UI buttons; "universal" shows branded text only

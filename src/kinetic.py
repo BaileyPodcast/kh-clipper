@@ -62,10 +62,14 @@ def _fps(path) -> float:
 
 def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="ok",
            faceband=None, frame=(1080, 1920), variants=("shorts", "universal"),
-           end_screen_cta=True):
+           quote_card_intro=False, end_screen_cta=True):
     """Render the KH Kinetic template. Mirrors src.caption.finish()'s call
     shape and return value (a list of written file paths) so clipper.py can
     branch between the two with no other change downstream.
+
+    `quote_card_intro` (Wave 2, opt-in, default off): the clip's hook line
+    (`banner`) opens as a full-bleed typographic card before the footage
+    cuts in, instead of overlaid on top of it. No-op without a `banner`.
 
     `end_screen_cta` (Wave 2 — KH End Screen, default ON): an animated CTA
     overlay on the clip's own final seconds — arrows-at-native-UI for the
@@ -77,7 +81,8 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
     With `end_screen_cta` on, "shorts" and "universal" are genuinely
     different renders now (arrows vs branded text/handle) — each requested
     variant gets its own render. With it off every variant is still
-    byte-identical (no CTA difference yet, same as pre-End-Screen v1), so
+    byte-identical (no CTA difference — the same "no per-variant difference
+    yet" case the original v1 KH Kinetic PR's own comment described), so
     this keeps the original render-once-and-copy cost optimisation for that
     case rather than paying for N identical renders.
 
@@ -120,6 +125,8 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
             base_cmd += ["--banner", banner]
         if faceband_path:
             base_cmd += ["--faceband", faceband_path]
+        if quote_card_intro:
+            base_cmd += ["--quote-card-intro"]
         if not end_screen_cta:
             base_cmd += ["--no-end-screen-cta"]
         env = dict(os.environ)
@@ -168,6 +175,7 @@ def main():
     ap.add_argument("--highlight", default=None)
     ap.add_argument("--banner", default=None)
     ap.add_argument("--safety", default="ok")
+    ap.add_argument("--quote-card-intro", action="store_true", dest="quote_card_intro")
     ap.add_argument("--no-end-screen-cta", action="store_false", dest="end_screen_cta",
                     default=True, help="Wave 2: opt this render out of the tail-window CTA overlay")
     args = ap.parse_args()
@@ -176,7 +184,8 @@ def main():
     words = clip_words(words_all, args.start, args.end)
     out_base = args.out or os.path.splitext(args.clip)[0]
     finish(args.clip, words, out_base, highlight_word=args.highlight,
-           banner=args.banner, safety=args.safety, end_screen_cta=args.end_screen_cta)
+           banner=args.banner, safety=args.safety, quote_card_intro=args.quote_card_intro,
+           end_screen_cta=args.end_screen_cta)
     print("done")
 
 

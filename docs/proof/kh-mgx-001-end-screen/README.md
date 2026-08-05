@@ -91,3 +91,35 @@ Regenerate: see `render/README.md` "Try it", adding `--variant
 shorts|universal` (and `--no-end-screen-cta` to opt a single render out) to
 the `render-cli.mjs` invocation, or `python -m src.kinetic ... --no-end-
 screen-cta` on the Python side.
+
+## Coexistence with KH Quote Card intro (post-merge)
+
+This template was built independently on `origin/main` before the KH Quote
+Card intro (#24) and KH Audiogram v2 (#25) PRs merged — both touched the
+same files (`Root.tsx`, `KHKinetic.tsx`, `brand.py`, `export_brand.py`,
+`kinetic.py`, `render-cli.mjs`, `test_kinetic_bridge.py`). After merging
+`origin/main` in, real renders confirm the two Wave 2 KHKinetic features
+compose correctly with `--quote-card-intro --variant shorts` both set:
+
+- `es_coexist_with_quote_card_intro.png` — the intro card at composition
+  t=0.5s, unaffected by the End Screen change.
+- `es_coexist_endscreen_shifted.png` — composition t=8.0s. The burned-in
+  timecode reads `00:00:06.500` — exactly `8.0 - 1.5` (the intro's own
+  duration), confirming the End Screen's Sequence (nested INSIDE
+  `mainContent`, which the intro shifts as a whole block) correctly follows
+  the shift with zero extra offset math, and renders with the exact same
+  clean, non-overlapping layout as the no-intro proof frames above.
+- Total duration with both features on: 9.557333s (video's own ~8.043s +
+  the intro's 1.5s, matching `getIntroFrames()`'s math) — confirms the End
+  Screen still contributes NOTHING to total length even with the intro
+  active; only the intro extends the composition, exactly as designed.
+
+Also re-ran `src.audiogram_v2` (the unrelated, independent KHAudiogramV2
+composition) after the merge as a sanity check on the shared
+`render-cli.mjs` dispatch refactor — real render, real frame pulled and
+inspected, unaffected by this PR's changes.
+
+Full suite after merge: `python -m pytest tests/` — 98 passed (matches
+`origin/main`'s own post-#24/#25 baseline exactly, confirmed by running the
+identical suite against a clean `git archive origin/main` checkout). `npx
+tsc --noEmit` clean.

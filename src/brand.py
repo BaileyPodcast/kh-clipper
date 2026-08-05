@@ -141,18 +141,35 @@ ANIMATION = {
         "end_scale": 1.04,
     },
 
+    # Wave 2 — KH Quote Card intro (Remotion only; the libass path has no
+    # equivalent). The clip's hook line (the same text the on-screen banner
+    # already carries) opens as a full-bleed typographic card BEFORE the
+    # footage cuts in, instead of overlaid on top of it. `enabled` here is a
+    # GLOBAL kill-switch (same role as punch_in's) — the actual per-clip
+    # choice to use it is a separate opt-in the caller passes explicitly
+    # (default off, same "capability exists, opt in per call" pattern
+    # caption_style itself uses), not driven by this flag alone.
+    # Reuses `presets[name]["fade_ms"]` for its fade and `presets[name]["pop"]`
+    # to decide whether the entrance also drifts/scales in (standard) or is a
+    # plain fade only (calm) — no separate preset dict needed.
+    "quote_card_intro": {
+        "enabled": True,
+        "duration_sec": 1.5,
+        "drift_px": 24,          # standard-preset entrance drift distance
+    },
+
     # Wave 2 — KH End Screen (Remotion only; the libass path has its own,
     # separate always-on CTA system, src/cta.py, unaffected by this). An
     # animated CTA overlay over the FINAL SECONDS of the clip — NOT appended
     # after (that is the retired src/endscreen.py pattern); the overlay
     # occupies the tail of the composition's own existing duration, so total
-    # duration is unaffected (unlike quote_card_intro, which prepends and
-    # genuinely extends it). `enabled` is a GLOBAL kill-switch (same role as
-    # punch_in's/quote_card_intro's). Unlike quote_card_intro, the per-clip
-    # choice defaults ON (`src.kinetic.finish(end_screen_cta=True)`) so the
-    # kinetic style stays at parity with classic's own always-on CTA instead
-    # of being a downgrade — see KH-MGX-001 Wave 2 End Screen PR body for the
-    # reasoning.
+    # duration is unaffected (unlike quote_card_intro above, which prepends
+    # and genuinely extends it). `enabled` is a GLOBAL kill-switch (same role
+    # as punch_in's/quote_card_intro's). Unlike quote_card_intro, the
+    # per-clip choice defaults ON (`src.kinetic.finish(end_screen_cta=True)`)
+    # so the kinetic style stays at parity with classic's own always-on CTA
+    # instead of being a downgrade — see KH-MGX-001 Wave 2 End Screen PR body
+    # for the reasoning.
     "end_screen": {
         "enabled": True,
         "window_sec": 3.0,      # tail window the overlay occupies ("final ~2-3 seconds")
@@ -186,6 +203,114 @@ AUDIOGRAM = {
     "wave_colour": COLOURS["gold"]["hex"],            # 30% gold waveform
     "accent_colour": COLOURS["lime"]["hex"],          # 10% lime accent line
     "text_colour": COLOURS["dark_olive"]["hex"],
+}
+
+# ----------------------------------------------------------------------
+# AUDIOGRAM V2 — KH-MGX-001 Wave 2. Remotion render of the KH design-suite
+# audiogram card (source of truth: kh-studio's KHAudiogram.dc.html), a
+# genuine visual upgrade over the Pillow frame-by-frame version
+# (src/audiogram.py): a real spring-eased waveform-bar entrance, animated
+# caption transitions and a data-driven progress fill, instead of every
+# frame being independently drawn with no real easing between them.
+#
+# Per-series palette (bg/ink/accent/logo/seed) stays in src/audiogram.py's
+# PALETTES table (resolved server-side, same as today) — not duplicated
+# here. Everything ELSE a render needs — fonts, timing, spring config,
+# per-format layout geometry — lives HERE so render-cli.mjs / the React
+# component never hardcode a size, font or timing (KH-MGX-001 locked
+# decision #2). Fonts match the KH design-suite's own family set
+# (Archivo / Open Sans / IBM Plex Mono, per SHORTS-AUDIOGRAM-DESIGN-
+# SPEC.md), distinct from ANIMATION's KH Heading / KH Caption pair used
+# by the KH Kinetic caption template.
+#
+# Trauma-informed rule (KH-TIC-001 / KH-MGX-001 locked decision #3):
+# CALM (any clip whose safety != "ok") disables the spring-eased bar
+# entrance and the progress-fill glow — fades only, no pop, no bounce.
+# The reactive waveform bar HEIGHT itself (driven by the clip's real
+# voice) and the linear progress fill stay ACTIVE under CALM in both
+# presets — they are a continuous, non-jarring representation of the
+# audio/playback position, the entire point of an audiogram, not a
+# decorative flourish; src/audiogram.py already renders that reactive
+# waveform identically for every clip regardless of safety rating, with
+# no complaint raised against it. Only the ENTRANCE motion and the
+# celebratory progress-glow are gated by the preset.
+# ----------------------------------------------------------------------
+AUDIOGRAM_V2 = {
+    "fonts": {
+        # Re-named uniquely (matching brand.py's own convention for the
+        # Kinetic fonts above) so the render never accidentally grabs a
+        # different installed weight.
+        "heading_bold":  {"family": "KH Audio Heading",       "file": "assets/fonts/Archivo-Bold.ttf"},
+        "heading_xbold": {"family": "KH Audio Heading XBold", "file": "assets/fonts/Archivo-ExtraBold.ttf"},
+        "body":          {"family": "KH Audio Body",          "file": "assets/fonts/OpenSans.ttf"},
+        "mono":          {"family": "KH Audio Mono",          "file": "assets/fonts/IBMPlexMono-Regular.ttf"},
+    },
+
+    # Waveform bars — count matches src/audiogram.py's NBARS exactly, so
+    # the seeded-envelope fallback below (used when a clip has no usable
+    # audio) is pixel-for-pixel the same shape as the Pillow version.
+    "bars": {
+        "count": 44,
+        "min_scale": 0.34,          # matches audiogram.py's floor exactly
+        "entrance_ms": 700,         # whole-row spring entrance duration
+        "entrance_stagger_ms": 12,  # per-bar stagger (44 * 12ms ~= 530ms sweep, left to right)
+        "spring_damping": 16,
+        "spring_mass": 0.7,
+        "calm_fade_ms": 320,        # CALM: no spring pop, the row fades in instead
+    },
+
+    # Progress bar — true 0->100% fill over the clip's real duration
+    # (same as audiogram.py); the "glow" is a purely decorative pulse at
+    # completion, standard preset only.
+    "progress": {
+        "fill_glow_ms": 260,
+    },
+
+    # Timed caption chunks (src/audiogram.py's group_caption_lines shape)
+    # cross-fade between each other; the static single-caption mode uses
+    # the same fade-in-once timing.
+    "caption_transition": {
+        "fade_ms": 220,
+        "calm_fade_ms": 420,        # CALM: a longer, gentler fade, no hard cut
+    },
+
+    "presets": {
+        "standard": {"bar_entrance_spring": True,  "progress_glow": True},
+        "calm":     {"bar_entrance_spring": False, "progress_glow": False},
+    },
+
+    # Per-format layout geometry, ported 1:1 from src/audiogram.py's
+    # _build_static()/_render() constants (wide=landscape, tall=vertical,
+    # everything else=square) so a Remotion render lands on the exact same
+    # proportions the Pillow version already established. Every value is
+    # in cqw units (percent of min(width, height)/100), matching
+    # audiogram.py's own `cqw = min(W, H) / 100.0` convention.
+    "layout": {
+        "wide": {   # landscape, 16:9 — the KH-VRL-001 promo-video format
+            "pad_x": 6.0, "pad_y": 6.0,
+            "logo_h": 7.5, "eyebrow_size": 2.2, "caption_size": 4.0,
+            "waveform_h": 22.0, "bar_w": 2.2, "bar_gap": 1.1,
+            "caption_max_w_frac": 0.72,  # fraction of the FULL frame width, not cqw
+        },
+        "tall": {   # vertical, 9:16
+            "pad_x": 7.0, "pad_y": 8.0,
+            "logo_h": 12.0, "eyebrow_size": 3.8, "caption_size": 5.4,
+            "waveform_h": 34.0, "bar_w": 1.4, "bar_gap": 0.7,
+            "caption_max_w_frac": None,  # uses caption_max_w_cqw below
+            "caption_max_w_cqw": 84.0,
+        },
+        "square": {
+            "pad_x": 8.0, "pad_y": 8.0,
+            "logo_h": 8.6, "eyebrow_size": 2.5, "caption_size": 4.4,
+            "waveform_h": 24.0, "bar_w": 1.4, "bar_gap": 0.7,
+            "caption_max_w_frac": None,
+            "caption_max_w_cqw": 84.0,
+        },
+        "bar_radius": 0.7,     # cqw, same in every format
+        "centre_gap": 5.0,     # cqw, gap between waveform row and caption
+        "progress_h": 0.7,     # cqw
+        "progress_gap": 3.5,   # cqw, gap between progress bar and footer text
+    },
 }
 
 # ----------------------------------------------------------------------

@@ -3,13 +3,68 @@
 A second, selectable render path for Shorts (`caption_style="kinetic"`,
 alongside the default `"classic"` libass path in `src/caption.py`): sprung
 word-by-word captions, the clip's highlight word oversized in gold, the same
-face-aware placement and CALM trauma-informed preset as Wave 1 — everything
-libass can't do (spring physics, proper web typography, animated end screens
-and quote cards in later waves).
+face-aware placement and CALM trauma-informed preset as Wave 1, a full-bleed
+hook-line quote card intro, and an animated CTA end screen — everything
+libass can't do (spring physics, proper web typography, animated overlays).
 
-**v1 of this PR ships ONE template: KH Kinetic.** The other Wave 2 templates
-(KH Quote Card intro, KH End Screen, KH Audiogram v2) are explicit follow-ups,
-each its own PR, per the brief's own phased order.
+**Wave 2 templates shipped so far, in order:** KH Kinetic (the base
+composition, below), KH Quote Card intro (hook line as a full-bleed card
+before the footage cuts in), KH End Screen (an animated CTA overlay on the
+clip's own final seconds — see its own section below), KH Audiogram v2 (a
+second, standalone composition — see its own section below). Each landed as
+its own PR per the brief's own phased order.
+
+**KH End Screen (KHKinetic's third template, on by default)** — an animated
+CTA overlay on the clip's own final seconds (`brand.animation.endScreen`,
+3.0s by default), an OVERLAY on the composition's existing duration, never
+an append (unlike the retired `src/endscreen.py`) and never extending total
+duration (unlike Quote Card intro, which genuinely does). Reuses
+`brand.CTA`'s copy and native-UI target pixels VERBATIM from `src/cta.py`
+(never a second copy) so kinetic stays on the same message as classic's own
+always-on CTA. Two variants, both built: `shorts` (gold arrows point at
+YouTube's native Shorts UI buttons) and `universal` (branded text + the
+`@handle`, no arrows, for Reels/TikTok) — `--variant shorts|universal` on
+`render-cli.mjs`, defaulting to `shorts`. Default ON (parity with classic's
+own always-on CTA) — `--no-end-screen-cta` opts a single render out. CALM
+preset (KH-TIC-001): fade only, no spring pop/drift, same rule as Quote Card
+intro and the caption pop-in.
+
+**KH Audiogram v2 ships a second composition,
+`KHAudiogramV2`**, reached via `render-cli.mjs --composition audiogram-v2`
+(default remains `kinetic`, so every existing `src/kinetic.py` call — which
+never passes `--composition` — is unchanged). It renders the approved KH
+design-suite audiogram card (source of truth: kh-studio's
+`lib/social-suite/suite/KHAudiogram.dc.html`, per
+`SHORTS-AUDIOGRAM-DESIGN-SPEC.md`), replacing/augmenting the Pillow
+frame-by-frame version (`src/audiogram.py`) for promo video (ties into
+KH-VRL-001) with real animated elements independent per-frame compositing
+can't cleanly do: a spring-eased, staggered waveform-bar entrance, cross-
+fading timed caption transitions, and a data-driven progress fill with a
+subtle completion glow. Supports all three formats `src/audiogram.py` does
+(landscape 16:9, vertical 9:16, square), and the same trauma-informed CALM
+preset rule (fades only, no pop/bounce, on any `safety != "ok"` clip). See
+`src/audiogram_v2.py`'s module docstring and the long comment on
+`AUDIOGRAM_V2` in `src/brand.py` for the full design. Python bridge:
+
+```bash
+python -m src.audiogram_v2 <clip.mp4> [transcript.json] --start S --end E \
+    --series kintsugi-heroes --caption "..." --title "..." --guest "..." \
+    [--format landscape|square|vertical] [--safety ok|review] [--out <out_base>]
+```
+
+Direct `render-cli.mjs` invocation (what `src/audiogram_v2.py` shells out
+to — `--props` is a JSON file the Python bridge precomputes, holding
+everything the template needs beyond `brand.json` + the staged clip: title/
+guestName/eyebrow/epLabel/caption/timedLines/amps/seedBars/palette/safety/
+width/height/fps/durationInFrames/logoFile — too data-heavy, in particular
+the per-frame amplitude array, to sensibly flatten into individual CLI
+flags the way the kinetic path's simpler per-clip overrides are):
+
+```bash
+node render-cli.mjs --composition audiogram-v2 \
+  --video <clip.mp4> --brand brand.json --props <audiogram-props.json> \
+  --out <out.mp4>
+```
 
 ## License position (verified 2026-08-05, re-verify at build time)
 
@@ -100,7 +155,12 @@ node render-cli.mjs \
   --brand brand.json \
   --out /tmp/out.mp4 \
   --duration 6.0 --fps 30 \
-  --highlight broken --banner "The moment everything changed" --safety ok
+  --highlight broken --banner "The moment everything changed" --safety ok \
+  --variant shorts                 # or "universal"; End Screen CTA is on by
+                                    # default — add --no-end-screen-cta to
+                                    # opt a single render out, or
+                                    # --quote-card-intro to also open on the
+                                    # hook-line card
 ```
 
 `words.json` is the same clip-relative `[{"text","start","end"}, ...]` shape

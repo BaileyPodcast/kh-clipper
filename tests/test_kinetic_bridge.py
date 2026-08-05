@@ -23,8 +23,12 @@ from src import export_brand, kinetic
 
 def test_export_brand_shape_has_no_ass_values():
     data = export_brand.build()
-    # "cta" (Wave 2 — KH End Screen, reuses brand.CTA copy/targets verbatim)
-    assert set(data.keys()) == {"colours", "fonts", "caption", "animation", "cta"}
+    # `audiogramV2` was added by the KH Audiogram v2 follow-up
+    # (tests/test_audiogram_v2_bridge.py locks its own shape down) — the
+    # KHKinetic-relevant top-level keys below are otherwise unchanged. "cta"
+    # (Wave 2 — KH End Screen, reuses brand.CTA copy/targets verbatim) IS
+    # required here, since KHKinetic.tsx's own EndScreenCta reads it.
+    assert {"colours", "fonts", "caption", "animation", "cta"} <= set(data.keys())
     # hex colours (web), never ASS &HAABBGGRR values
     for v in data["colours"].values():
         assert v.startswith("#") and len(v) == 7
@@ -61,6 +65,16 @@ def test_export_brand_camel_case_matches_render_types():
     assert "channelProfile" in data["cta"]["shortsTargets"]
 
 
+def test_export_brand_quote_card_intro_shape():
+    # KH Quote Card intro (Wave 2 template 2) — render/src/KHKinetic.tsx's
+    # getIntroFrames() reads brand.animation.quoteCardIntro.{enabled,durationSec}.
+    data = export_brand.build()
+    qci = data["animation"]["quoteCardIntro"]
+    assert qci["enabled"] is True
+    assert qci["durationSec"] == 1.5
+    assert qci["driftPx"] == 24
+
+
 # ---------------------------------------------------------------------------
 # kinetic.py — availability guard + ffprobe helpers
 # ---------------------------------------------------------------------------
@@ -82,6 +96,44 @@ def test_finish_raises_cleanly_when_unavailable(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as e:
         assert "render/node_modules" in str(e) or "unavailable" in str(e)
+
+
+def test_finish_threads_quote_card_intro_flag_to_the_node_cli(monkeypatch, tmp_path):
+    # KH Quote Card intro (Wave 2 template 2): finish()'s quote_card_intro=True
+    # must append --quote-card-intro to the render-cli.mjs command; off by
+    # default (the flag must not appear at all when False).
+    monkeypatch.setattr(kinetic, "available", lambda: True)
+    monkeypatch.setattr(export_brand, "export_brand", lambda *a, **k: str(tmp_path / "brand.json"))
+    monkeypatch.setattr(kinetic, "_duration", lambda p: 6.0)
+    monkeypatch.setattr(kinetic, "_fps", lambda p: 30.0)
+
+    captured = {}
+
+    class FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        # kinetic.finish() reads the rendered file back — stand one up.
+        out_path = cmd[cmd.index("--out") + 1]
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(b"fake mp4 bytes")
+        return FakeResult()
+
+    monkeypatch.setattr(kinetic.subprocess, "run", fake_run)
+
+    out_base = str(tmp_path / "clip")
+    kinetic.finish("clip.mp4", [], out_base, banner="A hard chapter",
+                    quote_card_intro=True, variants=("shorts",))
+    assert "--quote-card-intro" in captured["cmd"]
+
+    captured.clear()
+    kinetic.finish("clip.mp4", [], out_base, banner="A hard chapter",
+                    quote_card_intro=False, variants=("shorts",))
+    assert "--quote-card-intro" not in captured["cmd"]
 
 
 # ---------------------------------------------------------------------------
