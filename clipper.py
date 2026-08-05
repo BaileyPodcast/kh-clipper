@@ -29,7 +29,7 @@ import json
 import os
 
 from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
-                 review, audiogram, moments as moments_mod)
+                 review, audiogram, kinetic, moments as moments_mod)
 
 
 def _transcribe_local(source_path, provider, episode_id=None, output_root="output", usage_ctx=None):
@@ -79,11 +79,29 @@ def _transcribe(url, provider, output_root="output", usage_ctx=None):
     return path
 
 
+def _finish(vertical, words, out_base, banner, highlight_word, safety, clip_index,
+            caption_style="classic"):
+    """Branch at the finish stage (KH-MGX-001 Wave 2): 'kinetic' renders via
+    the Remotion premium layer (src.kinetic); 'classic' (default) is the
+    existing libass path (src.caption), unchanged. A kinetic failure never
+    costs the clip -- falls back to classic, the same best-effort pattern
+    already used throughout this pipeline (reframe's pan fallback, Wave 1's
+    punch-in fallback)."""
+    if caption_style == "kinetic":
+        try:
+            return kinetic.finish(vertical, words, out_base, banner=banner,
+                                  highlight_word=highlight_word, safety=safety)
+        except Exception as e:
+            print(f"      ~ kinetic render failed ({str(e)[:160]}); falling back to classic")
+    return caption.finish(vertical, words, out_base, banner=banner,
+                          highlight_word=highlight_word, safety=safety, clip_index=clip_index)
+
+
 def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
         series=None, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
-        guest_name=None, moments=None, usage_ctx=None):
+        guest_name=None, moments=None, usage_ctx=None, caption_style="classic"):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -184,7 +202,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
                 "series": series, "guest_name": guest_name, "clips": [],
                 "review_md_path": None, "transcript_path": tpath,
                 "candidate_pool": result.get("candidate_pool", []),
-                "transcript_source": transcript_source}
+                "transcript_source": transcript_source, "caption_style": caption_style}
     words_all = tdata["words"]
 
     # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
@@ -216,10 +234,12 @@ def run(url=None, provider="grok", transcript=None, source=None,
             words = caption.clip_words(words_all, c["start"], c["end"])
             # Kinetic captions (KH-MGX-001): highlight_word + safety (-> CALM preset
             # for anything not "ok") + clip index (alternates the punch-in direction).
-            outs = caption.finish(vertical, words, os.path.join(final_dir, c["clip_id"]),
-                                  banner=banner_by_id.get(c["clip_id"]),
-                                  highlight_word=c.get("highlight_word"),
-                                  safety=c.get("safety", "ok"), clip_index=i)
+            # caption_style picks classic (libass, Wave 1) or kinetic (Remotion, Wave 2).
+            outs = _finish(vertical, words, os.path.join(final_dir, c["clip_id"]),
+                          banner=banner_by_id.get(c["clip_id"]),
+                          highlight_word=c.get("highlight_word"),
+                          safety=c.get("safety", "ok"), clip_index=i,
+                          caption_style=caption_style)
             # No appended end screen (1.6, decided 2026-08-05) — an appended outro
             # broke the loop rerank.py rewards. The final frame is real story
             # footage; the brand moment lives in the CTA end cards instead.
@@ -303,13 +323,15 @@ def run(url=None, provider="grok", transcript=None, source=None,
         "transcript_path": tpath,            # worker persists this for per-clip ops
         "candidate_pool": result.get("candidate_pool", []),
         "transcript_source": transcript_source,   # reuse_assemblyai | grok_stt | whisperx
+        "caption_style": caption_style,      # classic (libass) | kinetic (Remotion, Wave 2)
     }
 
 
 def render_clip(spec, url=None, source=None, words_all=None, series=None,
                 guest_name=None, reframe_mode="speaker", reframe_offset=0.0,
                 make_audiogram=True, index=0, output_root="output",
-                with_metadata=False, episode_title="", episode_url="", usage_ctx=None):
+                with_metadata=False, episode_title="", episode_url="", usage_ctx=None,
+                caption_style="classic"):
     """Cut + reframe + caption + brand ONE moment, returning a clip dict in the same
     shape as run()'s `clips[]` entries (clip_id, start, end, files, framing, ...).
 
@@ -354,9 +376,11 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     # Kinetic captions (KH-MGX-001), same rules as the full run: highlight_word +
     # safety (-> CALM preset) + index (alternates the punch-in direction). No
     # appended end screen (1.6) — the final frame is real story footage.
-    outs = caption.finish(vertical, words, os.path.join(final_dir, cid), banner=banner,
-                          highlight_word=spec.get("highlight_word"),
-                          safety=spec.get("safety", "ok"), clip_index=index)
+    # caption_style picks classic (libass, Wave 1) or kinetic (Remotion, Wave 2).
+    outs = _finish(vertical, words, os.path.join(final_dir, cid), banner=banner,
+                   highlight_word=spec.get("highlight_word"),
+                   safety=spec.get("safety", "ok"), clip_index=index,
+                   caption_style=caption_style)
     if make_audiogram:
         try:
             audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series,

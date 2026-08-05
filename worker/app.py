@@ -45,19 +45,41 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Image: Python 3.12 (broad compatibility) + ffmpeg + the pipeline deps + the repo.
 # Local code/assets are copied in as the final layers. `output/` and `venv/` are
 # excluded — they are not needed in the image.
+#
+# KH-MGX-001 Wave 2: Node.js is added to THIS SAME image (single Modal function,
+# no cross-function orchestration) so the worker can shell out to the Remotion
+# render layer (render/render-cli.mjs, invoked via src/kinetic.py) for
+# caption_style="kinetic" — "classic" (default) never touches Node at all.
+# NodeSource's own setup script pins an exact major (22, matching what this repo
+# was built/tested against), rather than trusting whatever Debian's apt currently
+# ships. `npm ci` runs at IMAGE BUILD time (render/ copied in with copy=True so
+# it's baked into this layer, not a runtime mount) so a cold worker start never
+# waits on the npm registry. No browser is bundled here — Remotion downloads and
+# caches its own Chrome Headless Shell on first render (its documented default
+# for server/CI environments); set REMOTION_BROWSER_EXECUTABLE in the image (or
+# a Modal secret) later if that first-render cold-start cost needs trimming.
 image = (
     modal.Image.debian_slim(python_version="3.12")
     # ffmpeg for cut/reframe/caption; the GL libs are MediaPipe's runtime deps — without
     # them BlazeFace fails to init (libGLESv2.so.2 missing) and every clip silently
     # centre-crops instead of following the speaker (see src/reframe.py fail-soft path).
-    .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "libegl1", "libgles2")
+    .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "libegl1", "libgles2",
+                 "curl", "ca-certificates", "gnupg")
     # pillow + numpy power the branded audiogram renderer (src/audiogram.py): it draws
     # each frame of the KH design-suite audiogram and ffmpeg muxes the clip audio under it.
     .pip_install("yt-dlp", "requests", "mediapipe", "ffmpeg-python", "fastapi[standard]",
                  "gdown", "pillow", "numpy", "anthropic")
+    .run_commands(
+        "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+        "apt-get install -y nodejs",
+    )
     .add_local_file(os.path.join(REPO_ROOT, "clipper.py"), "/root/clipper.py")
     .add_local_dir(os.path.join(REPO_ROOT, "src"), "/root/src")
     .add_local_dir(os.path.join(REPO_ROOT, "assets"), "/root/assets")
+    # node_modules/brand.json are gitignored (never present in a clean checkout);
+    # copy=True bakes render/ into this image layer so the npm ci below can see it.
+    .add_local_dir(os.path.join(REPO_ROOT, "render"), "/root/render", copy=True)
+    .run_commands("cd /root/render && npm ci --omit=dev")
 )
 
 app = modal.App(APP_NAME)
@@ -439,7 +461,8 @@ def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None)
 @app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
-                guest_name: str = None, transcript: dict = None, moments: list = None):
+                guest_name: str = None, transcript: dict = None, moments: list = None,
+                caption_style: str = "classic"):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -471,7 +494,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 source_file=src, episode_id=file_id, series=series, count=count,
                 make_audiogram=audiogram, progress_cb=progress, output_root="/tmp/job",
                 reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
-                moments=moments,
+                moments=moments, caption_style=caption_style,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": file_id},
             )
         else:
@@ -480,6 +503,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 url=url, series=series, count=count, make_audiogram=audiogram,
                 progress_cb=progress, output_root="/tmp/job", reframe_mode=reframe,
                 guest_name=guest_name, transcript=tpath, moments=moments,
+                caption_style=caption_style,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": _youtube_id(url)},
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
@@ -689,6 +713,7 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 reframe_mode=str(reframe_mode or "speaker"),
                 reframe_offset=float(reframe_offset or 0.0), index=index,
                 output_root="/tmp/clipjob", with_metadata=False,
+                caption_style=outputs.get("caption_style", "classic"),
                 usage_ctx={"job_id": job_id, "source": "worker",
                            "episode_ref": outputs.get("episode_id") or job.get("episode_id")})
             cprog("running", 85, "uploading")
@@ -736,6 +761,7 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 spec, url=url, words_all=words_all, series=series, guest_name=guest_name,
                 reframe_mode=str(job.get("reframe") or "speaker"), index=index,
                 output_root="/tmp/clipjob", with_metadata=True,
+                caption_style=outputs.get("caption_style", "classic"),
                 episode_title=episode_title, episode_url=episode_url,
                 usage_ctx={"job_id": job_id, "source": "worker",
                            "episode_ref": outputs.get("episode_id") or job.get("episode_id")})
@@ -983,5 +1009,9 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         payload.get("transcript"),
         # Exact-cut windows (or None for auto-select).
         moments,
+        # KH-MGX-001 Wave 2: "classic" (libass, default) | "kinetic" (Remotion).
+        # Not in the contract yet (kh-studio doesn't send this field today) —
+        # defaults to classic so every existing caller is unaffected.
+        str(payload.get("caption_style") or "classic"),
     )
     return {"accepted": True, "job_id": payload["job_id"]}
