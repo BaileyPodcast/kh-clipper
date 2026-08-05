@@ -1,0 +1,25 @@
+{
+  "name": "kh-clipper-render",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KH Clipper — Wave 2 (KH-MGX-001): the Remotion premium render layer. A second, selectable render path (caption_style=kinetic) producing agency-grade Shorts output libass cannot: sprung word-by-word captions, styled caption groups, animated end screens (later waves), quote cards (later waves). Kintsugi Heroes only.",
+  "type": "module",
+  "scripts": {
+    "render": "node render-cli.mjs"
+  },
+  "license": "SEE LICENSE IN README.md",
+  "dependencies": {
+    "@remotion/bundler": "^4.0.506",
+    "@remotion/captions": "^4.0.506",
+    "@remotion/cli": "^4.0.506",
+    "@remotion/renderer": "^4.0.506",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remotion": "^4.0.506"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.18",
+    "typescript": "^5.9.3"
+  }
+}

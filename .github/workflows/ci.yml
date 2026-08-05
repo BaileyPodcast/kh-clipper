@@ -15,3 +15,19 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - run: pytest tests/ -v
+
+  # KH-MGX-001 Wave 2: typecheck the Remotion render layer. Deliberately NOT a
+  # real render here (needs Chromium + a real clip; that's proven manually/in
+  # render/README.md, not on every push) -- this just catches a type error
+  # before it reaches a real Shorts job.
+  render-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: render
+      - run: npx tsc --noEmit
+        working-directory: render
