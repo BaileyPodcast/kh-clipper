@@ -73,11 +73,15 @@ image = (
         "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
         "apt-get install -y nodejs",
     )
-    .add_local_file(os.path.join(REPO_ROOT, "clipper.py"), "/root/clipper.py")
-    .add_local_dir(os.path.join(REPO_ROOT, "src"), "/root/src")
-    .add_local_dir(os.path.join(REPO_ROOT, "assets"), "/root/assets")
-    # node_modules/brand.json are gitignored (never present in a clean checkout);
-    # copy=True bakes render/ into this image layer so the npm ci below can see it.
+    # copy=True on every add_local_* below: Modal only allows a build step (the
+    # npm ci at the end) to run after add_local_* calls when ALL of them copy
+    # into the image layer rather than mount at container start — confirmed by
+    # a real failed deploy (KH-MGX-001 Wave 2's first attempt): "An image tried
+    # to run a build step after using image.add_local_* ... set copy=True".
+    # node_modules/brand.json are gitignored (never present in a clean checkout).
+    .add_local_file(os.path.join(REPO_ROOT, "clipper.py"), "/root/clipper.py", copy=True)
+    .add_local_dir(os.path.join(REPO_ROOT, "src"), "/root/src", copy=True)
+    .add_local_dir(os.path.join(REPO_ROOT, "assets"), "/root/assets", copy=True)
     .add_local_dir(os.path.join(REPO_ROOT, "render"), "/root/render", copy=True)
     .run_commands("cd /root/render && npm ci --omit=dev")
 )
