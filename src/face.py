@@ -156,13 +156,34 @@ def _audio_voiced(clip_path, n_frames):
         return [1] * n_frames
 
 
+def _face_band(frames_dict, height):
+    """The guest's vertical extent across the clip: min top / max bottom of their
+    face bbox, normalised to frame height (0=top, 1=bottom). Used by caption.py
+    (KH-MGX-001 1.3) to keep captions/the hook banner clear of the guest's face —
+    one number pair for the whole clip, not per frame. Reframe only ever crops
+    horizontally (full source height kept), so this normalised band survives the
+    crop+scale to the output frame unchanged."""
+    if not frames_dict or not height:
+        return None
+    tops, bottoms = [], []
+    for f in frames_dict.values():
+        _, y, _, h = f["bbox"]
+        tops.append(y / height)
+        bottoms.append((y + h) / height)
+    if not tops:
+        return None
+    return {"top": max(0.0, min(tops)), "bottom": min(1.0, max(bottoms))}
+
+
 def analyze(clip_path):
     """Return a framing decision dict:
-        {width, height, n_frames, multi_ratio, guest_cx, mode, track, people}
+        {width, height, n_frames, multi_ratio, guest_cx, mode, track, people, face_band}
     where mode is 'single' | 'follow' | 'ambiguous', and guest_cx is the horizontal
     pixel centre to crop around (None if we should centre-crop). `track` is a list of
     (t_seconds, cx) samples of the GUEST (the speaking subject) over the clip so reframe
-    can pan with them; `people` is the number of stable subjects on screen.
+    can pan with them; `people` is the number of stable subjects on screen. `face_band`
+    is the guest's normalised vertical extent (KH-MGX-001 1.3), or None when we don't
+    know which face is the guest (mode == "ambiguous" never sets it).
     Raises if detection cannot run at all (caller falls back to centre-crop + review)."""
     import mediapipe as mp
     import numpy as np
@@ -214,6 +235,7 @@ def analyze(clip_path):
                 "multi_ratio": round(multi_ratio, 2),
                 "guest_cx": cxs[len(cxs) // 2] if cxs else None,
                 "mode": "single", "track": track or None, "people": max(1, len(tracks)),
+                "face_band": _face_band(single, height),
             }
 
         # Two-plus subjects: the guest is the one SPEAKING. Score each subject by mouth
@@ -228,7 +250,8 @@ def analyze(clip_path):
     def ambiguous():
         return {"width": width, "height": height, "n_frames": n,
                 "multi_ratio": round(multi_ratio, 2), "guest_cx": None,
-                "mode": "ambiguous", "track": None, "people": len(tracks)}
+                "mode": "ambiguous", "track": None, "people": len(tracks),
+                "face_band": None}          # we don't know who the guest is — no band
 
     ranked = sorted(tracks, key=score, reverse=True)
     s0 = score(ranked[0])
@@ -256,4 +279,5 @@ def analyze(clip_path):
         "multi_ratio": round(multi_ratio, 2),
         "guest_cx": cxs[len(cxs) // 2] if cxs else None,
         "mode": "follow", "track": track or None, "people": len(tracks),
+        "face_band": _face_band(guest["frames"], height),
     }
