@@ -12,7 +12,9 @@
  *     --video <clip.mp4> --words <words.json> --brand <brand.json> \
  *     --out <out.mp4> --duration <seconds> --fps <fps> \
  *     [--highlight <word>] [--banner <text>] [--safety ok|review] \
- *     [--faceband <faceband.json>] [--width 1080] [--height 1920]
+ *     [--faceband <faceband.json>] [--width 1080] [--height 1920] \
+ *     [--quote-card-intro]   (Wave 2: hook line as a full-bleed card before
+ *                             the footage cuts in; needs --banner set)
  *
  * Prints one JSON line to stdout on success: {"ok":true,"out":...,"render_ms":...}
  * Exits non-zero with an error on stderr on failure.
@@ -94,6 +96,10 @@ async function main() {
     height,
     fps,
     durationInFrames,
+    // Wave 2 — KH Quote Card intro: opt-in per render (--quote-card-intro),
+    // off by default. calculateMetadata (Root.tsx) extends the composition's
+    // total length to cover it; no separate duration math needed here.
+    quoteCardIntro: Boolean(args["quote-card-intro"]),
   };
 
   const t0 = Date.now();
