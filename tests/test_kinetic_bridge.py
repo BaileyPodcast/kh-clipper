@@ -23,7 +23,10 @@ from src import export_brand, kinetic
 
 def test_export_brand_shape_has_no_ass_values():
     data = export_brand.build()
-    assert set(data.keys()) == {"colours", "fonts", "caption", "animation"}
+    # `audiogramV2` was added by the KH Audiogram v2 follow-up
+    # (tests/test_audiogram_v2_bridge.py locks its own shape down) — the
+    # KHKinetic-relevant top-level keys below are otherwise unchanged.
+    assert {"colours", "fonts", "caption", "animation"} <= set(data.keys())
     # hex colours (web), never ASS &HAABBGGRR values
     for v in data["colours"].values():
         assert v.startswith("#") and len(v) == 7

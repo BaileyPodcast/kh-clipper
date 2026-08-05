@@ -11,6 +11,43 @@ and quote cards in later waves).
 (KH Quote Card intro, KH End Screen, KH Audiogram v2) are explicit follow-ups,
 each its own PR, per the brief's own phased order.
 
+**KH Audiogram v2 (this follow-up PR) ships a second composition,
+`KHAudiogramV2`**, reached via `render-cli.mjs --composition audiogram-v2`
+(default remains `kinetic`, so every existing `src/kinetic.py` call — which
+never passes `--composition` — is unchanged). It renders the approved KH
+design-suite audiogram card (source of truth: kh-studio's
+`lib/social-suite/suite/KHAudiogram.dc.html`, per
+`SHORTS-AUDIOGRAM-DESIGN-SPEC.md`), replacing/augmenting the Pillow
+frame-by-frame version (`src/audiogram.py`) for promo video (ties into
+KH-VRL-001) with real animated elements independent per-frame compositing
+can't cleanly do: a spring-eased, staggered waveform-bar entrance, cross-
+fading timed caption transitions, and a data-driven progress fill with a
+subtle completion glow. Supports all three formats `src/audiogram.py` does
+(landscape 16:9, vertical 9:16, square), and the same trauma-informed CALM
+preset rule (fades only, no pop/bounce, on any `safety != "ok"` clip). See
+`src/audiogram_v2.py`'s module docstring and the long comment on
+`AUDIOGRAM_V2` in `src/brand.py` for the full design. Python bridge:
+
+```bash
+python -m src.audiogram_v2 <clip.mp4> [transcript.json] --start S --end E \
+    --series kintsugi-heroes --caption "..." --title "..." --guest "..." \
+    [--format landscape|square|vertical] [--safety ok|review] [--out <out_base>]
+```
+
+Direct `render-cli.mjs` invocation (what `src/audiogram_v2.py` shells out
+to — `--props` is a JSON file the Python bridge precomputes, holding
+everything the template needs beyond `brand.json` + the staged clip: title/
+guestName/eyebrow/epLabel/caption/timedLines/amps/seedBars/palette/safety/
+width/height/fps/durationInFrames/logoFile — too data-heavy, in particular
+the per-frame amplitude array, to sensibly flatten into individual CLI
+flags the way the kinetic path's simpler per-clip overrides are):
+
+```bash
+node render-cli.mjs --composition audiogram-v2 \
+  --video <clip.mp4> --brand brand.json --props <audiogram-props.json> \
+  --out <out.mp4>
+```
+
 ## License position (verified 2026-08-05, re-verify at build time)
 
 Remotion's license (`remotion-dev/remotion/LICENSE.md`) grants a **Free
