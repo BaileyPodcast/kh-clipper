@@ -51,6 +51,14 @@ export type BrandAnimation = {
     startScale: number;
     endScale: number;
   };
+  // Wave 2 — KH End Screen: the tail-window CTA overlay's own timing knobs.
+  // `enabled` is the global kill-switch (mirrors punchIn's); the per-clip
+  // opt-out is a separate boolean, `KhKineticProps.endScreenCta`.
+  endScreen: {
+    enabled: boolean;
+    windowSec: number;
+    staggerMs: number;
+  };
   presets: {
     standard: PresetConfig;
     calm: PresetConfig;
@@ -64,11 +72,35 @@ export type PresetConfig = {
   fadeMs: number;
 };
 
+// Wave 2 — KH End Screen: brand.CTA reused verbatim (copy + native-UI target
+// pixels), exported by src/export_brand.py from the SAME dict src/cta.py
+// (the classic libass CTA) already reads — never a second copy of the copy
+// or the tuned target positions. Colours are not duplicated here: the CTA's
+// pill/text/accent colours are the same darkOlive/creamWhite/gold already in
+// BrandColours, so the render layer reads those directly.
+export type BrandCta = {
+  copy: {
+    subscribeSoft: string;
+    subscribe: string;
+    fullEpisode: string;
+    related: string;
+    handle: string;
+  };
+  shortsTargets: {
+    subscribeBtn: [number, number];
+    channelProfile: [number, number];
+    relatedLink: [number, number];
+  };
+  pillOpacity: number;
+  fontSize: number;
+};
+
 export type Brand = {
   colours: BrandColours;
   fonts: BrandFonts;
   caption: BrandCaption;
   animation: BrandAnimation;
+  cta: BrandCta;
 };
 
 export type FaceBand = {
@@ -94,4 +126,15 @@ export type KhKineticProps = {
   height: number;
   fps: number;
   durationInFrames: number;
+  // Wave 2 — KH End Screen. `variant` picks which CTA flavour renders (only
+  // matters when endScreenCta is on): "shorts" points gold arrows at
+  // YouTube's native Shorts UI buttons; "universal" shows branded text only
+  // (the @handle), no arrows, for Reels/TikTok. Defaults to "shorts" so a
+  // caller that never sets it still gets a sensible render.
+  variant?: "shorts" | "universal";
+  // Default ON (parity with classic's own always-on CTA, src/cta.py) — the
+  // per-clip opt-out src.kinetic.finish(end_screen_cta=False) threads
+  // through to here. A no-op past the end of a genuinely tiny clip (the
+  // window clamps to the clip's own duration).
+  endScreenCta?: boolean;
 };

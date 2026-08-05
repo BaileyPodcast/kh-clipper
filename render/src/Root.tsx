@@ -22,6 +22,8 @@ const DEFAULT_PROPS: KhKineticProps = {
   height: 1920,
   fps: 30,
   durationInFrames: 150,
+  variant: "shorts",
+  endScreenCta: true,
   brand: {
     colours: {
       gold: "#ED9A1F",
@@ -48,10 +50,27 @@ const DEFAULT_PROPS: KhKineticProps = {
       captionBands: { defaultMarginVPx: 380, raisedMarginVPx: 620, lowFaceThreshold: 0.62 },
       bannerBands: { defaultMarginVPx: 360, midMarginVPx: 520, highFaceThreshold: 0.2 },
       punchIn: { enabled: true, startScale: 1.0, endScale: 1.04 },
+      endScreen: { enabled: true, windowSec: 3.0, staggerMs: 500 },
       presets: {
         standard: { pop: true, highlight: true, punchIn: true, fadeMs: 60 },
         calm: { pop: false, highlight: false, punchIn: false, fadeMs: 220 },
       },
+    },
+    cta: {
+      copy: {
+        subscribeSoft: "Subscribe for more real stories",
+        subscribe: "Don't forget to subscribe",
+        fullEpisode: "Listen to the full episode",
+        related: "Full episode in the linked video below",
+        handle: "@kintsugiheroes",
+      },
+      shortsTargets: {
+        subscribeBtn: [430, 1715],
+        channelProfile: [150, 1715],
+        relatedLink: [300, 1830],
+      },
+      pillOpacity: 0.85,
+      fontSize: 72,
     },
   },
 };

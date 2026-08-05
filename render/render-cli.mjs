@@ -12,7 +12,12 @@
  *     --video <clip.mp4> --words <words.json> --brand <brand.json> \
  *     --out <out.mp4> --duration <seconds> --fps <fps> \
  *     [--highlight <word>] [--banner <text>] [--safety ok|review] \
- *     [--faceband <faceband.json>] [--width 1080] [--height 1920]
+ *     [--faceband <faceband.json>] [--width 1080] [--height 1920] \
+ *     [--variant shorts|universal] [--no-end-screen-cta]
+ *       (Wave 2: KH End Screen — an animated CTA overlay on the clip's own
+ *       final seconds, on by default; --variant picks arrows-at-native-UI
+ *       ["shorts", the default] vs branded-text-only ["universal"];
+ *       --no-end-screen-cta opts a single render out of it entirely)
  *
  * Prints one JSON line to stdout on success: {"ok":true,"out":...,"render_ms":...}
  * Exits non-zero with an error on stderr on failure.
@@ -94,6 +99,10 @@ async function main() {
     height,
     fps,
     durationInFrames,
+    // Wave 2 — KH End Screen: on by default (parity with classic's own
+    // always-on CTA, src/cta.py) — --no-end-screen-cta is the one opt-out.
+    variant: (args.variant === "universal" ? "universal" : "shorts"),
+    endScreenCta: !args["no-end-screen-cta"],
   };
 
   const t0 = Date.now();

@@ -81,6 +81,29 @@ const bandForBanner = (faceband: FaceBand, brand: Brand): number => {
 
 const msToFrames = (ms: number, fps: number): number => Math.round((ms / 1000) * fps);
 
+/** Wave 2 — KH End Screen. How many frames the tail-window CTA overlay
+ * occupies — 0 when the feature is off (either the per-clip `endScreenCta`
+ * flag or the global `brand.animation.endScreen.enabled` kill-switch),
+ * clamped to the clip's own `durationInFrames` so a genuinely short clip
+ * never asks for a window bigger than the clip itself. Exported for the same
+ * reason KHKinetic.tsx's `getIntroFrames` is: one place this math lives, so
+ * nothing else can drift from what the component actually lays out. UNLIKE
+ * `getIntroFrames`, this is never added to the total composition length —
+ * the overlay occupies the TAIL of the clip's own existing duration (an
+ * overlay, not an append), so Root.tsx's `calculateMetadata` needs no change
+ * for this template. */
+export const getEndScreenFrames = (
+  endScreenCta: boolean | undefined,
+  brand: Brand,
+  fps: number,
+  durationInFrames: number,
+): number => {
+  if (endScreenCta === false) return 0;
+  if (!brand.animation.endScreen.enabled) return 0;
+  const raw = msToFrames(brand.animation.endScreen.windowSec * 1000, fps);
+  return Math.max(1, Math.min(raw, durationInFrames));
+};
+
 /** @font-face declarations pointing at the two KH font files, copied into the
  * render's public dir alongside the video by render-cli.mjs. */
 const FontFaces: React.FC<{ brand: Brand }> = ({ brand }) => (
@@ -149,6 +172,193 @@ const Banner: React.FC<{ text: string | null; brand: Brand; faceband: FaceBand; 
         {text.trim().replace(/\.$/, "")}
       </div>
     </div>
+  );
+};
+
+/** Wave 2 — KH End Screen: a small gold down-arrow, drawn (never a text
+ * glyph — the two self-hosted KH TTFs are heading/caption weights only and
+ * carry no guarantee of an arrow codepoint, and this exactly mirrors why
+ * src/cta.py's own `_arrow()` draws an ASS vector shape instead of a Unicode
+ * character). Stem + downward triangle, same silhouette as the ASS path.
+ * `target` is the SAME absolute canvas pixel pair `brand.cta.shortsTargets`
+ * already carries for the classic CTA — centred `70px` above the target
+ * (mirrors cta.py's `by - 70` / `px - 70`), so the tip points down at the
+ * real native-UI button without covering it. */
+const EndScreenArrow: React.FC<{ target: [number, number]; brand: Brand; opacity: number; size?: number }> = ({
+  target,
+  brand,
+  opacity,
+  size = 86,
+}) => {
+  const [x, y] = target;
+  const stemH = size * 0.5;
+  const headH = size * 0.5;
+  const headW = size * 0.7;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: x,
+        top: y - 70,
+        transform: "translate(-50%, -50%)",
+        opacity,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+      }}
+    >
+      <div style={{ width: size * 0.28, height: stemH, background: brand.colours.gold }} />
+      <div
+        style={{
+          width: 0,
+          height: 0,
+          borderLeft: `${headW / 2}px solid transparent`,
+          borderRight: `${headW / 2}px solid transparent`,
+          borderTop: `${headH}px solid ${brand.colours.gold}`,
+        }}
+      />
+    </div>
+  );
+};
+
+/** Wave 2 — KH End Screen: an animated CTA overlay over the FINAL SECONDS of
+ * the clip (an overlay on the composition's own existing duration, NEVER
+ * appended after — that is the retired src/endscreen.py pattern). Reuses
+ * `brand.cta`'s copy and native-UI target pixels verbatim (exported from the
+ * SAME brand.CTA dict src/cta.py's classic libass CTA already reads), so
+ * kinetic and classic stay on the same message.
+ *
+ * Two variants, both built (the brief's own "correct parity target"):
+ *   - "shorts": gold arrows point at YouTube's native Shorts UI buttons.
+ *   - "universal": branded text only (the @handle), no arrows — for
+ *     Reels/TikTok where the native buttons sit elsewhere.
+ *
+ * Deliberate departure from classic's own two TIME-ROTATED cards across its
+ * 6s end window: at a 2-3s tail window (this template's own, shorter
+ * `brand.animation.endScreen.windowSec`) there isn't enough time to rotate
+ * through two cards and have either be legible, so both messages (subscribe,
+ * then watch the full episode) STAGGER on together instead of taking turns —
+ * everything stays on screen and readable for the whole window rather than
+ * flashing past. Same copy, same gentle KH voice, adapted to a shorter,
+ * purely-overlay window; see the PR body for the full reasoning.
+ *
+ * CALM preset (KH-TIC-001, locked decision #3): fade only, no spring
+ * pop/drift — same rule as QuoteCardIntro and the caption pop-in.
+ * (classic's own CTA, src/cta.py, has NO calm branch at all — it renders
+ * full-energy regardless of `safety`; found while building this, flagged in
+ * the PR body, not changed here — a separate, pre-existing component.)
+ *
+ * Real bug found on the first render, fixed here: showing all three lines
+ * at once (vs. classic's one-line-at-a-time rotation) gives this a taller
+ * footprint, and a hardcoded bottom offset collided with a 2-line caption
+ * page in the (common) raised face-band. Fixed by anchoring off the SAME
+ * `bandForCaptions()` the captions themselves use, plus a fixed clearance —
+ * so the CTA block always sits a consistent, safe distance above wherever
+ * the captions actually are, in either band, regardless of 1- or 2-line
+ * wrap. See the PR body. */
+const CAPTION_CLEARANCE_PX = 550;
+
+const EndScreenCta: React.FC<{
+  variant: "shorts" | "universal";
+  brand: Brand;
+  preset: PresetConfig;
+  faceband: FaceBand;
+}> = ({ variant, brand, preset, faceband }) => {
+  const frame = useCurrentFrame(); // local to the wrapping Sequence — 0 at the window's own start
+  const { fps } = useVideoConfig();
+  const cta = brand.cta;
+  const shorts = variant === "shorts";
+  const fadeFrames = Math.max(1, msToFrames(preset.fadeMs, fps));
+  const staggerFrames = msToFrames(brand.animation.endScreen.staggerMs, fps);
+  const pillBottom = bandForCaptions(faceband, brand) + CAPTION_CLEARANCE_PX;
+
+  const groupOpacity = (delayFrames: number): number => {
+    const local = frame - delayFrames;
+    return local < 0 ? 0 : Math.min(1, local / fadeFrames);
+  };
+  const groupOffset = (delayFrames: number): number => {
+    if (!preset.pop) return 0; // CALM: fade only, no drift
+    const local = frame - delayFrames;
+    if (local < 0) return 18;
+    const entrance = spring({ frame: local, fps, durationInFrames: fadeFrames, config: { damping: 16, mass: 0.7 } });
+    return 18 * (1 - entrance);
+  };
+
+  const pillStyle: React.CSSProperties = {
+    background: `rgba(45, 47, 34, ${cta.pillOpacity})`, // dark-olive pill, brand.cta.pillOpacity
+    color: brand.colours.creamWhite,
+    fontFamily: brand.fonts.headingFamily,
+    fontWeight: 600,
+    fontSize: cta.fontSize,
+    padding: "16px 36px",
+    borderRadius: 4,
+    textAlign: "center",
+  };
+
+  const withAccent = (text: string, word: string): React.ReactNode => {
+    const idx = text.toLowerCase().indexOf(word.toLowerCase());
+    if (idx === -1) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <span style={{ color: brand.colours.gold }}>{text.slice(idx, idx + word.length)}</span>
+        {text.slice(idx + word.length)}
+      </>
+    );
+  };
+
+  const subOpacity = groupOpacity(0);
+  const subOffset = groupOffset(0);
+  const episodeOpacity = groupOpacity(staggerFrames);
+  const episodeOffset = groupOffset(staggerFrames);
+
+  return (
+    <>
+      <div
+        style={{
+          position: "absolute",
+          bottom: pillBottom, // caption band + fixed clearance — never collides, either band
+          left: 60,
+          right: 60,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 22,
+        }}
+      >
+        <div style={{ opacity: subOpacity, transform: `translateY(${subOffset}px)` }}>
+          <div style={pillStyle}>{withAccent(cta.copy.subscribe, "subscribe")}</div>
+          {!shorts && (
+            <div style={{ ...pillStyle, marginTop: 14, fontSize: cta.fontSize * 0.72 }}>{cta.copy.handle}</div>
+          )}
+        </div>
+        <div
+          style={{
+            opacity: episodeOpacity,
+            transform: `translateY(${episodeOffset}px)`,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <div style={pillStyle}>{withAccent(cta.copy.fullEpisode, "full")}</div>
+          <div style={pillStyle}>{cta.copy.related}</div>
+        </div>
+      </div>
+      {shorts && (
+        <>
+          <EndScreenArrow target={cta.shortsTargets.subscribeBtn} brand={brand} opacity={subOpacity} />
+          <EndScreenArrow target={cta.shortsTargets.channelProfile} brand={brand} opacity={episodeOpacity} />
+          <EndScreenArrow
+            target={cta.shortsTargets.relatedLink}
+            brand={brand}
+            opacity={episodeOpacity}
+            size={64}
+          />
+        </>
+      )}
+    </>
   );
 };
 
@@ -276,9 +486,21 @@ const KHPage: React.FC<{
 };
 
 export const KHKinetic: React.FC<KhKineticProps> = (props) => {
-  const { videoFileName, words, highlightWord, banner, safety, faceband, brand, durationInFrames } = props;
+  const {
+    videoFileName,
+    words,
+    highlightWord,
+    banner,
+    safety,
+    faceband,
+    brand,
+    durationInFrames,
+    variant,
+    endScreenCta,
+  } = props;
   const { fps } = useVideoConfig();
   const preset = presetFor(safety, brand);
+  const endScreenFrames = getEndScreenFrames(endScreenCta, brand, fps, durationInFrames);
 
   const captions: Caption[] = words.map((w) => ({
     text: w.text,
@@ -308,6 +530,15 @@ export const KHKinetic: React.FC<KhKineticProps> = (props) => {
           </Sequence>
         );
       })}
+      {/* Wave 2 — KH End Screen: an OVERLAY on the clip's own final seconds,
+          not an append — a Sequence anchored to the tail of the EXISTING
+          durationInFrames, never extending it (unlike QuoteCardIntro's
+          intro, which genuinely lengthens the composition). */}
+      {endScreenFrames > 0 && (
+        <Sequence from={durationInFrames - endScreenFrames} durationInFrames={endScreenFrames} layout="none">
+          <EndScreenCta variant={variant || "shorts"} brand={brand} preset={preset} faceband={faceband} />
+        </Sequence>
+      )}
     </AbsoluteFill>
   );
 };
