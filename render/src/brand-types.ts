@@ -51,6 +51,11 @@ export type BrandAnimation = {
     startScale: number;
     endScale: number;
   };
+  quoteCardIntro: {
+    enabled: boolean;
+    durationSec: number;
+    driftPx: number;
+  };
   presets: {
     standard: PresetConfig;
     calm: PresetConfig;
@@ -93,5 +98,6 @@ export type KhKineticProps = {
   width: number;
   height: number;
   fps: number;
-  durationInFrames: number;
+  durationInFrames: number; // the VIDEO's own duration — never includes the intro
+  quoteCardIntro: boolean; // opt-in per render; off by default (see Root.tsx defaultProps)
 };

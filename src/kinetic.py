@@ -61,10 +61,15 @@ def _fps(path) -> float:
 
 
 def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="ok",
-           faceband=None, frame=(1080, 1920), variants=("shorts", "universal")):
+           faceband=None, frame=(1080, 1920), variants=("shorts", "universal"),
+           quote_card_intro=False):
     """Render the KH Kinetic template. Mirrors src.caption.finish()'s call
     shape and return value (a list of written file paths) so clipper.py can
     branch between the two with no other change downstream.
+
+    `quote_card_intro` (Wave 2, opt-in, default off): the clip's hook line
+    (`banner`) opens as a full-bleed typographic card before the footage
+    cuts in, instead of overlaid on top of it. No-op without a `banner`.
 
     v1 (this PR) has no per-variant CTA differences yet (Remotion CTA end
     cards, the arrows-vs-branded-text split libass's cta.py does, are a later
@@ -116,6 +121,8 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
             cmd += ["--banner", banner]
         if faceband_path:
             cmd += ["--faceband", faceband_path]
+        if quote_card_intro:
+            cmd += ["--quote-card-intro"]
         env = dict(os.environ)
         browser = os.environ.get("REMOTION_BROWSER_EXECUTABLE")
         if browser:
@@ -151,13 +158,14 @@ def main():
     ap.add_argument("--highlight", default=None)
     ap.add_argument("--banner", default=None)
     ap.add_argument("--safety", default="ok")
+    ap.add_argument("--quote-card-intro", action="store_true", dest="quote_card_intro")
     args = ap.parse_args()
     from src.caption import clip_words
     words_all = json.load(open(args.transcript)).get("words", [])
     words = clip_words(words_all, args.start, args.end)
     out_base = args.out or os.path.splitext(args.clip)[0]
     finish(args.clip, words, out_base, highlight_word=args.highlight,
-           banner=args.banner, safety=args.safety)
+           banner=args.banner, safety=args.safety, quote_card_intro=args.quote_card_intro)
     print("done")
 
 

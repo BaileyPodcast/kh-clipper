@@ -78,6 +78,11 @@ def build() -> dict:
                 "startScale": anim["punch_in"]["start_scale"],
                 "endScale": anim["punch_in"]["end_scale"],
             },
+            "quoteCardIntro": {
+                "enabled": anim["quote_card_intro"]["enabled"],
+                "durationSec": anim["quote_card_intro"]["duration_sec"],
+                "driftPx": anim["quote_card_intro"]["drift_px"],
+            },
             "presets": {
                 "standard": preset("standard"),
                 "calm": preset("calm"),

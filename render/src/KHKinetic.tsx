@@ -81,6 +81,24 @@ const bandForBanner = (faceband: FaceBand, brand: Brand): number => {
 
 const msToFrames = (ms: number, fps: number): number => Math.round((ms / 1000) * fps);
 
+/** Wave 2 — KH Quote Card intro. How many frames the intro card occupies
+ * before the footage cuts in — 0 when the feature is off, unavailable
+ * globally (brand.animation.quoteCardIntro.enabled), or there's no hook line
+ * to show (never render an intro on empty text). Exported so Root.tsx's
+ * calculateMetadata can compute the SAME total composition length this
+ * component actually lays out — one source of truth, no drift between the
+ * two, the same discipline as caption.py's own duration/fps helpers. */
+export const getIntroFrames = (
+  quoteCardIntro: boolean | undefined,
+  banner: string | null | undefined,
+  brand: Brand,
+  fps: number,
+): number => {
+  if (!quoteCardIntro || !banner || !banner.trim()) return 0;
+  if (!brand.animation.quoteCardIntro.enabled) return 0;
+  return msToFrames(brand.animation.quoteCardIntro.durationSec * 1000, fps);
+};
+
 /** @font-face declarations pointing at the two KH font files, copied into the
  * render's public dir alongside the video by render-cli.mjs. */
 const FontFaces: React.FC<{ brand: Brand }> = ({ brand }) => (
@@ -97,6 +115,84 @@ const FontFaces: React.FC<{ brand: Brand }> = ({ brand }) => (
     }
   `}</style>
 );
+
+/** Wave 2 — KH Quote Card intro: the clip's hook line as a full-bleed
+ * typographic card for the first `quoteCardIntro.durationSec`, BEFORE the
+ * footage cuts in (as opposed to the Banner above, which overlays the same
+ * text ON the footage). Local frame 0 = the very start of the composition —
+ * this component is never wrapped in an offsetting Sequence, so no fromMs
+ * translation is needed here (unlike KHPage/KHToken, which live inside a
+ * per-page Sequence and must subtract the page's own start).
+ * Standard preset: fades in AND drifts/scales up (spring). CALM preset
+ * (KH-TIC-001): fade only, no motion — the same fades-only rule the caption
+ * pop-in and the banner already follow. */
+const QuoteCardIntro: React.FC<{ text: string; brand: Brand; preset: PresetConfig; introFrames: number }> = ({
+  text,
+  brand,
+  preset,
+  introFrames,
+}) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const fadeFrames = Math.max(1, msToFrames(preset.fadeMs, fps));
+  const outStart = Math.max(0, introFrames - fadeFrames);
+  const opacity =
+    frame < fadeFrames
+      ? frame / fadeFrames
+      : frame < outStart
+        ? 1
+        : Math.max(0, (introFrames - frame) / fadeFrames);
+
+  let translateY = 0;
+  let scale = 1;
+  if (preset.pop) {
+    const entrance = spring({
+      frame,
+      fps,
+      durationInFrames: fadeFrames,
+      config: { damping: 16, mass: 0.7 },
+    });
+    translateY = brand.animation.quoteCardIntro.driftPx * (1 - entrance);
+    scale = 0.96 + 0.04 * entrance;
+  }
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: brand.colours.darkOlive,
+        justifyContent: "center",
+        alignItems: "center",
+        padding: "0 90px",
+        opacity,
+      }}
+    >
+      <div style={{ transform: `translateY(${translateY}px) scale(${scale})`, textAlign: "center" }}>
+        <div
+          style={{
+            color: brand.colours.creamWhite,
+            fontFamily: brand.fonts.headingFamily,
+            fontWeight: 600,
+            fontSize: 92,
+            lineHeight: 1.15,
+          }}
+        >
+          {text.trim()}
+        </div>
+        <div
+          style={{
+            marginTop: 32,
+            width: 120,
+            height: 6,
+            borderRadius: 3,
+            background: brand.colours.gold,
+            marginLeft: "auto",
+            marginRight: "auto",
+          }}
+        />
+      </div>
+    </AbsoluteFill>
+  );
+};
 
 const Banner: React.FC<{ text: string | null; brand: Brand; faceband: FaceBand; durationInFrames: number }> = ({
   text,
@@ -276,9 +372,11 @@ const KHPage: React.FC<{
 };
 
 export const KHKinetic: React.FC<KhKineticProps> = (props) => {
-  const { videoFileName, words, highlightWord, banner, safety, faceband, brand, durationInFrames } = props;
+  const { videoFileName, words, highlightWord, banner, safety, faceband, brand, durationInFrames, quoteCardIntro } =
+    props;
   const { fps } = useVideoConfig();
   const preset = presetFor(safety, brand);
+  const introFrames = getIntroFrames(quoteCardIntro, banner, brand, fps);
 
   const captions: Caption[] = words.map((w) => ({
     text: w.text,
@@ -294,9 +392,11 @@ export const KHKinetic: React.FC<KhKineticProps> = (props) => {
   });
   const pages = rechunkPages(rawPages, brand.caption.maxWordsPerLine);
 
-  return (
-    <AbsoluteFill style={{ backgroundColor: brand.colours.darkOlive }}>
-      <FontFaces brand={brand} />
+  // The existing footage + captions + on-video banner, unchanged from before
+  // the Quote Card intro existed — reused byte-for-byte whether or not the
+  // intro is on, just optionally shifted later by `introFrames`.
+  const mainContent = (
+    <>
       <OffthreadVideo src={staticFile(videoFileName)} />
       <Banner text={banner} brand={brand} faceband={faceband} durationInFrames={durationInFrames} />
       {pages.map((page, i) => {
@@ -308,6 +408,27 @@ export const KHKinetic: React.FC<KhKineticProps> = (props) => {
           </Sequence>
         );
       })}
+    </>
+  );
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: brand.colours.darkOlive }}>
+      <FontFaces brand={brand} />
+      {introFrames > 0 ? (
+        <>
+          <Sequence from={0} durationInFrames={introFrames} layout="none">
+            <QuoteCardIntro text={banner as string} brand={brand} preset={preset} introFrames={introFrames} />
+          </Sequence>
+          {/* A nested Sequence resets local frame 0 for everything inside it,
+              so mainContent's own internal timings (all computed relative to
+              the video's own t=0) need no change at all when shifted here. */}
+          <Sequence from={introFrames} durationInFrames={durationInFrames} layout="none">
+            {mainContent}
+          </Sequence>
+        </>
+      ) : (
+        mainContent
+      )}
     </AbsoluteFill>
   );
 };
