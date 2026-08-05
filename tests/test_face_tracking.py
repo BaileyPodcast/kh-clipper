@@ -116,3 +116,52 @@ def test_fit_filtergraph_shows_the_whole_frame():
 
 def test_probe_dims_never_raises_on_a_bad_path():
     assert reframe._probe_dims("/no/such/file.mp4") == (0, 0)
+
+
+# --- Face-aware caption placement (KH-MGX-001 1.3) ---------------------------
+# The guest's normalised vertical extent across the clip, computed from the SAME
+# per-frame bboxes the pan/crop logic already tracks — no new detection pass.
+
+def test_face_band_is_the_min_top_max_bottom_across_the_track():
+    # Frame height 1000. Two frames: face at y=100..300, then y=150..400.
+    frames = {
+        0: {"cx": 300, "area": 1.0, "bbox": (250, 100, 100, 200)},   # top .10 bottom .30
+        1: {"cx": 305, "area": 1.0, "bbox": (255, 150, 100, 250)},   # top .15 bottom .40
+    }
+    band = face._face_band(frames, height=1000)
+    assert band == {"top": 0.10, "bottom": 0.40}
+
+
+def test_face_band_none_for_empty_track():
+    assert face._face_band({}, height=1000) is None
+    assert face._face_band({0: {"bbox": (0, 0, 10, 10)}}, height=0) is None
+
+
+def test_face_band_clamps_into_0_1():
+    # A bbox that (via noisy detection) pokes slightly past the frame edge must
+    # never report an out-of-range band.
+    frames = {0: {"bbox": (0, -20, 100, 200)}}     # top would be -0.02
+    band = face._face_band(frames, height=1000)
+    assert band["top"] == 0.0
+    frames = {0: {"bbox": (0, 900, 100, 300)}}     # bottom would be 1.2
+    band = face._face_band(frames, height=1000)
+    assert band["bottom"] == 1.0
+
+
+def test_write_faceband_writes_a_json_sidecar(tmp_path):
+    out = str(tmp_path / "clip_v.mp4")
+    reframe._write_faceband(out, {"face_band": {"top": 0.2, "bottom": 0.6}})
+    import json
+    with open(out + ".faceband.json") as f:
+        data = json.load(f)
+    assert data == {"top": 0.2, "bottom": 0.6}
+
+
+def test_write_faceband_no_op_when_no_band(tmp_path):
+    # Never write a file for the ambiguous case — caption.py must fall back to
+    # the default band, not guess from a stale/missing sidecar.
+    out = str(tmp_path / "clip_v.mp4")
+    reframe._write_faceband(out, {"face_band": None})
+    assert not os.path.exists(out + ".faceband.json")
+    reframe._write_faceband(out, None)
+    assert not os.path.exists(out + ".faceband.json")

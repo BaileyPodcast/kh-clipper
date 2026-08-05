@@ -90,6 +90,77 @@ CAPTION = {
 }
 
 # ----------------------------------------------------------------------
+# ANIMATION — Shorts Motion Graphics Upgrade (KH-MGX-001, Wave 1).
+# Every tunable for kinetic captions, face-aware placement and the gentle
+# punch-in lives HERE. caption.py/reframe.py must never hardcode a timing,
+# scale or threshold — they read this block.
+#
+# Trauma-informed rule (KH-TIC-001 alignment, locked decision #3): a clip
+# whose safety rating is anything other than "ok" (i.e. "review") renders
+# with the CALM preset — fades only, no pop, no scale, no zoom. Energy never
+# overrides dignity. The preset lookup is `ANIMATION["presets"][name]`;
+# "standard" is the default, "calm" is selected by the caller (caption.py)
+# whenever the clip's safety != "ok".
+# ----------------------------------------------------------------------
+ANIMATION = {
+    # 1.1 — word pop-in. The active (currently spoken) word animates in from
+    # `pop_from_scale` to its target scale over `pop_ms`, via ASS \t + \fscx\fscy.
+    "pop_ms": 120,                  # entry animation duration (ms)
+    "pop_from_scale": 80,           # starting scale %, animates up to the target
+    "rest_scale": 100,              # a resting (not active, not highlighted) word
+    "active_scale": 108,            # the active word's target scale % while it's live
+    "line_fade_ms": 60,             # \fad(N,0) on line changes (new line fades in)
+
+    # 1.2 — emphasis word (detect.py's highlight_word). Rendered gold at this
+    # scale whenever it's on screen, active or not, so the emotional core of
+    # the clip visually lands. Disabled under the CALM preset.
+    "highlight_scale": 115,
+
+    # 1.3 — face-aware caption placement. reframe.py writes a per-clip
+    # <clip>.faceband.json (min/max normalised y of the guest's face across
+    # the WHOLE clip); caption.py picks ONE of these two bands for the whole
+    # clip — never per frame, no jitter.
+    "caption_bands": {
+        "default_margin_v_px": 380,     # unchanged default (lower band)
+        "raised_margin_v_px": 620,      # used when the face sits unusually low
+        "low_face_threshold": 0.62,     # face bottom (normalised) >= this = "low"
+    },
+    # Same face-aware idea applied to the hook banner (upper third), checked
+    # against the face TOP instead of the bottom.
+    "banner_bands": {
+        "default_margin_v_px": 360,     # unchanged default (matches Banner style)
+        "mid_margin_v_px": 520,         # dropped position when the crop puts the face high
+        "high_face_threshold": 0.20,    # face top (normalised) <= this = "high"
+    },
+
+    # 1.4 — gentle punch-in (Ken Burns zoom), optional, behind a flag. Default
+    # ON for standard clips; the CALM preset always forces it off.
+    "punch_in": {
+        "enabled": True,
+        "start_scale": 1.00,
+        "end_scale": 1.04,
+    },
+
+    # 1.5 — presets. `standard` is every effect above at full energy; `calm`
+    # is trauma-informed: fades only, no pop, no scale, no zoom, a longer,
+    # gentler fade. Selected automatically from the clip's safety rating.
+    "presets": {
+        "standard": {
+            "pop": True,             # word pop-in + active-word scale
+            "highlight": True,       # highlight_word emphasis
+            "punch_in": True,        # gentle Ken Burns zoom
+            "fade_ms": 60,           # line-change fade (mirrors line_fade_ms)
+        },
+        "calm": {
+            "pop": False,
+            "highlight": False,
+            "punch_in": False,
+            "fade_ms": 220,          # longer, gentler fade — no hard cuts, no energy
+        },
+    },
+}
+
+# ----------------------------------------------------------------------
 # AUDIOGRAM MODE (planned) — reuses the same palette + fonts.
 # ----------------------------------------------------------------------
 AUDIOGRAM = {

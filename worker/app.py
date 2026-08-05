@@ -681,6 +681,7 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 "hook_line": target.get("hook_line"), "archetype": target.get("archetype"),
                 "why": target.get("why", ""), "safety": target.get("safety", "ok"),
                 "safety_note": target.get("safety_note", ""),
+                "highlight_word": target.get("highlight_word", ""),   # KH-MGX-001 1.2
                 "metadata": target.get("metadata") or {},   # keep captions/banner stable
             }
             rendered = clipper.render_clip(
@@ -729,6 +730,7 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 "hook_line": pick.get("hook_line"), "archetype": pick.get("archetype"),
                 "why": "", "safety": pick.get("safety", "ok"),
                 "safety_note": pick.get("safety_note", ""), "text": pick.get("text", ""),
+                "highlight_word": pick.get("highlight_word", ""),   # KH-MGX-001 1.2
             }
             rendered = clipper.render_clip(
                 spec, url=url, words_all=words_all, series=series, guest_name=guest_name,

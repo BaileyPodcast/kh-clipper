@@ -27,6 +27,7 @@ returns a framing flag string: "ok" or "review".
 """
 from __future__ import annotations
 import argparse
+import json
 import subprocess
 
 W, H = 1080, 1920
@@ -102,6 +103,22 @@ def _run_ff(vf, src, out):
 def _centre_vf(w, h):
     return (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},setsar=1")
+
+
+def _write_faceband(out, info):
+    """KH-MGX-001 1.3 — sidecar the guest's face band next to the reframed clip so
+    caption.py can keep captions/the hook banner clear of their face. We only crop
+    HORIZONTALLY here (crop=...:src_h:x:0, full source height kept), so the band's
+    normalised y — computed against the SOURCE frame in face.py — survives the
+    crop+scale to the output frame unchanged. Best-effort; never raises."""
+    band = (info or {}).get("face_band")
+    if not band:
+        return
+    try:
+        with open(out + ".faceband.json", "w") as f:
+            json.dump(band, f)
+    except OSError:
+        pass
 
 
 def _follow_vf(w, h, src_w, src_h, guest_cx):
@@ -249,6 +266,7 @@ def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_fa
     # pan fighting a manual offset would just look like drift). _follow_vf clamps x.
     if off:
         _run_ff(_follow_vf(w, h, info["width"], info["height"], cx + off * info["width"]), src, out)
+        _write_faceband(out, info)
         return "ok"
 
     # single or follow: pan with the speaker over time, falling back to a static crop
@@ -256,6 +274,7 @@ def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_fa
     # never cost us the clip, so retry the static crop if ffmpeg rejects the pan.
     static_vf = _follow_vf(w, h, info["width"], info["height"], cx)
     pan_vf = _track_vf(w, h, info["width"], info["height"], info.get("track"))
+    _write_faceband(out, info)
     if pan_vf is None:
         _run_ff(static_vf, src, out)
         return "ok"

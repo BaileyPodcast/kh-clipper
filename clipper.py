@@ -16,8 +16,11 @@ Pipeline (each stage in src/):
     1 transcribe Grok STT (default) / WhisperX fallback
     2 detect     find Kintsugi moments (trauma-informed + safety gate)
     3 cut        pull only the chosen 1080p sections, frame-accurate, <=35s cap
-    4 reframe    16:9 -> 9:16
-    5 caption    Olive Pill karaoke + gentle CTAs + logo, dual export
+    4 reframe    16:9 -> 9:16 (writes a face-band sidecar, KH-MGX-001 1.3)
+    5 caption    Olive Pill KINETIC captions (pop-in, highlight word, punch-in,
+                 face-aware placement, CALM preset on review clips) + gentle
+                 CTAs + logo, dual export. No appended end screen (KH-MGX-001 1.6)
+                 — src/endscreen.py stays in the repo for non-Shorts outputs.
 
 Output: output/final/<clip_id>_shorts.mp4  and  _universal.mp4
 """
@@ -26,7 +29,7 @@ import json
 import os
 
 from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
-                 review, audiogram, endscreen, moments as moments_mod)
+                 review, audiogram, moments as moments_mod)
 
 
 def _transcribe_local(source_path, provider, episode_id=None, output_root="output", usage_ctx=None):
@@ -78,7 +81,7 @@ def _transcribe(url, provider, output_root="output", usage_ctx=None):
 
 def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
-        series=None, end_screen=True, source_file=None, episode_id=None,
+        series=None, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
         guest_name=None, moments=None, usage_ctx=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
@@ -211,15 +214,15 @@ def run(url=None, provider="grok", transcript=None, source=None,
                                       guest=result.get("guest_speaker"), mode=reframe_mode)
             c["framing"] = framing                    # carry into REVIEW.md
             words = caption.clip_words(words_all, c["start"], c["end"])
+            # Kinetic captions (KH-MGX-001): highlight_word + safety (-> CALM preset
+            # for anything not "ok") + clip index (alternates the punch-in direction).
             outs = caption.finish(vertical, words, os.path.join(final_dir, c["clip_id"]),
-                                  banner=banner_by_id.get(c["clip_id"]))
-            # Branded end screen: dissolve each finished Short into the outro,
-            # alternating the two options across clips (clip i -> option i%2).
-            if end_screen and endscreen.available():
-                opt = None
-                for f in outs:
-                    opt = endscreen.append_to(f, i)
-                c["end_screen"] = opt
+                                  banner=banner_by_id.get(c["clip_id"]),
+                                  highlight_word=c.get("highlight_word"),
+                                  safety=c.get("safety", "ok"), clip_index=i)
+            # No appended end screen (1.6, decided 2026-08-05) — an appended outro
+            # broke the loop rerank.py rewards. The final frame is real story
+            # footage; the brand moment lives in the CTA end cards instead.
             finals.extend(outs)
             # Opt-in branded audiograms (square + vertical) from the clip's audio.
             if make_audiogram:
@@ -233,9 +236,12 @@ def run(url=None, provider="grok", transcript=None, source=None,
         except Exception as e:
             print(f"      ! {c['clip_id']} failed: {str(e)[:160]}")
         finally:
-            try:                       # tidy the intermediate; never fatal
+            try:                       # tidy the intermediates; never fatal
                 if os.path.exists(vertical):
                     os.remove(vertical)
+                sidecar = vertical + ".faceband.json"
+                if os.path.exists(sidecar):
+                    os.remove(sidecar)
             except OSError:
                 pass
 
@@ -283,6 +289,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             "safety": clip.get("safety", "ok"),
             "safety_note": clip.get("safety_note", ""),
             "framing": clip.get("framing", "ok"),
+            "highlight_word": clip.get("highlight_word", ""),   # KH-MGX-001 1.2
             "metadata": clip.get("metadata", {}),
             "files": files,
         })
@@ -301,7 +308,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
 
 def render_clip(spec, url=None, source=None, words_all=None, series=None,
                 guest_name=None, reframe_mode="speaker", reframe_offset=0.0,
-                make_audiogram=True, end_screen=True, index=0, output_root="output",
+                make_audiogram=True, index=0, output_root="output",
                 with_metadata=False, episode_title="", episode_url="", usage_ctx=None):
     """Cut + reframe + caption + brand ONE moment, returning a clip dict in the same
     shape as run()'s `clips[]` entries (clip_id, start, end, files, framing, ...).
@@ -344,10 +351,12 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode,
                               offset=reframe_offset)
     words = caption.clip_words(words_all or [], start, end)
-    outs = caption.finish(vertical, words, os.path.join(final_dir, cid), banner=banner)
-    if end_screen and endscreen.available():
-        for f in outs:
-            endscreen.append_to(f, index)
+    # Kinetic captions (KH-MGX-001), same rules as the full run: highlight_word +
+    # safety (-> CALM preset) + index (alternates the punch-in direction). No
+    # appended end screen (1.6) — the final frame is real story footage.
+    outs = caption.finish(vertical, words, os.path.join(final_dir, cid), banner=banner,
+                          highlight_word=spec.get("highlight_word"),
+                          safety=spec.get("safety", "ok"), clip_index=index)
     if make_audiogram:
         try:
             audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series,
@@ -355,7 +364,7 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
                              guest_name=guest_name)
         except Exception as e:
             print(f"      ! audiogram skipped: {str(e)[:160]}")
-    for p in (cut_file, vertical):                 # tidy intermediates
+    for p in (cut_file, vertical, vertical + ".faceband.json"):    # tidy intermediates
         try:
             if os.path.exists(p):
                 os.remove(p)
@@ -401,16 +410,13 @@ def main():
                     help="also render branded audiograms (square + vertical) per clip")
     ap.add_argument("--series", default=None,
                     help="series name for audiogram artwork -> assets/artwork/<series>.png")
-    ap.add_argument("--no-endscreen", action="store_true",
-                    help="skip the branded end screen on each clip")
     args = ap.parse_args()
     if not args.url and not args.transcript:
         ap.error("give a YouTube URL or --transcript")
     run(url=args.url, provider=args.provider, transcript=args.transcript,
         source=args.source, use_llm=not args.no_llm,
         max_sec=args.max_sec, safe_only=args.safe_only, count=args.count,
-        make_audiogram=args.audiogram, series=args.series,
-        end_screen=not args.no_endscreen)
+        make_audiogram=args.audiogram, series=args.series)
 
 
 if __name__ == "__main__":
