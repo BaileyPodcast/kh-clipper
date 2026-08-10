@@ -52,6 +52,139 @@ ARCHETYPES = [
     ("Story Teaser",   16, 35),
 ]
 
+# ----------------------------------------------------------------------
+# Clip type profiles (KH-CTP-001): type steers SELECTION and RANKING only.
+# It never weakens the specific-story gate, the cliche penalty, the sensation
+# penalty, the safety gate or NMS; those run identically for every type.
+# Every typed tunable lives HERE (no magic numbers in the scoring code).
+#
+# Per profile:
+#   weights        multipliers on the existing KH Fit Score terms
+#                  (hook, hook4s, turn, keyword, length, agency). "best" is all
+#                  1.0, which keeps its scoring bit-identical to the legacy path.
+#   target_band    (lo, hi) seconds the type aims for; None = the legacy
+#                  shorter-is-better curve ("best" only). Bands come from the
+#                  KH-CTP-001 length policy (KH channel evidence, 2026-08-05).
+#   allowed_band   (lo, hi) seconds; outside it a candidate is REJECTED for this
+#                  type. Always inside the global 8s..35s hard limits.
+#   marker_bonus   {"turn"|"agency"|"emotion": (points_per_hit, cap)} extra
+#                  additive boost from the existing marker sets.
+#   require_lead_with  hard constraint on the lead: "agency" for raw_moment
+#                  (only moments where the person acts/decides/mends qualify).
+#   tragedy_lead_penalty  points off when the moment leads with tragedy
+#                  (hero_today: penalise past-tense tragedy leads).
+#   proper_noun_density   (max_per_10_tokens, penalty): universal_truth wants a
+#                  plainly-said insight, not a names-heavy anecdote.
+#   curiosity_bonus  points added when the hook opens a genuine curiosity gap
+#                  (a question, or a pivot marker in the hook): story_teaser.
+# ----------------------------------------------------------------------
+TYPED_LENGTH_TARGET_SCORE = 10.0   # length score inside the type's target band
+TYPED_LENGTH_EDGE_SCORE = 2.0      # length score at the allowed-band edge
+
+_NEUTRAL_WEIGHTS = {"hook": 1.0, "hook4s": 1.0, "turn": 1.0,
+                    "keyword": 1.0, "length": 1.0, "agency": 1.0}
+
+TYPE_PROFILES = {
+    # Current behaviour, untouched: legacy curve, no boosts, no typed penalties.
+    "best": {
+        "label": "Best overall",
+        "weights": dict(_NEUTRAL_WEIGHTS),
+        "target_band": None,
+        "allowed_band": (MIN_LEN_SEC, MAX_LEN_SEC),
+        "marker_bonus": {},
+        "require_lead_with": None,
+        "tragedy_lead_penalty": 0,
+        "proper_noun_density": None,
+        "curiosity_bonus": 0,
+    },
+    # GOLDEN JOINERY, the mend: the decision, realisation, who showed up.
+    "turning_point": {
+        "label": "Turning Point",
+        "weights": {**_NEUTRAL_WEIGHTS, "turn": 1.6, "agency": 1.4},
+        "target_band": (15, 25),
+        "allowed_band": (12, 30),
+        "marker_bonus": {"turn": (2, 8), "agency": (1, 4)},
+        "require_lead_with": None,
+        "tragedy_lead_penalty": 0,
+        "proper_noun_density": None,
+        "curiosity_bonus": 0,
+    },
+    # HERO TODAY: who they are now, what they built, their message.
+    "hero_today": {
+        "label": "Hero Today",
+        "weights": {**_NEUTRAL_WEIGHTS, "agency": 1.6},
+        "target_band": (12, 22),
+        "allowed_band": (10, 26),
+        "marker_bonus": {"agency": (2, 8)},
+        "require_lead_with": None,
+        "tragedy_lead_penalty": 12,
+        "proper_noun_density": None,
+        "curiosity_bonus": 0,
+    },
+    # FRACTURE, held with care: a vivid honest moment from the breaking point.
+    # HARD CONSTRAINT: only lead_with = agency qualifies (fracture as context,
+    # never spectacle). The sensation penalty and safety gate run unchanged.
+    "raw_moment": {
+        "label": "Raw Moment",
+        "weights": {**_NEUTRAL_WEIGHTS, "hook4s": 1.2, "turn": 1.2},
+        "target_band": (12, 20),
+        "allowed_band": (10, 24),
+        "marker_bonus": {"emotion": (2, 8)},
+        "require_lead_with": "agency",
+        "tragedy_lead_penalty": 0,
+        "proper_noun_density": None,
+        "curiosity_bonus": 0,
+    },
+    # The wisdom the arc produced: a hard-won insight said plainly. Prefers the
+    # short band and low proper-noun density (an insight, not a names-heavy
+    # anecdote). The full cliche penalty stays, unchanged.
+    "universal_truth": {
+        "label": "Universal Truth",
+        "weights": {**_NEUTRAL_WEIGHTS, "hook": 1.2},
+        "target_band": (10, 15),
+        "allowed_band": (8, 16),
+        "marker_bonus": {},
+        "require_lead_with": None,
+        "tragedy_lead_penalty": 0,
+        "proper_noun_density": (1.5, 6),   # >1.5 proper nouns per 10 tokens: -6
+        "curiosity_bonus": 0,
+    },
+    # The arc in miniature: a genuine curiosity gap the FULL episode pays off.
+    # Must still satisfy on its own as a complete thought (existing rule).
+    "story_teaser": {
+        "label": "Story Teaser",
+        "weights": {**_NEUTRAL_WEIGHTS, "hook": 1.3, "hook4s": 1.2},
+        "target_band": (20, 30),
+        "allowed_band": (16, 35),
+        "marker_bonus": {},
+        "require_lead_with": None,
+        "tragedy_lead_penalty": 0,
+        "proper_noun_density": None,
+        "curiosity_bonus": 6,
+    },
+}
+
+
+def typed_length_score(length_sec, profile):
+    """Length score for a TYPED job: best inside the target band, degrading
+    linearly toward the allowed-band edges, None (reject) outside the allowed
+    band. `best` never comes here (its target_band is None -> legacy curve)."""
+    t_lo, t_hi = profile["target_band"]
+    a_lo, a_hi = profile["allowed_band"]
+    if length_sec < a_lo or length_sec > a_hi:
+        return None
+    if t_lo <= length_sec <= t_hi:
+        return TYPED_LENGTH_TARGET_SCORE
+    if length_sec < t_lo:
+        span, dist = t_lo - a_lo, t_lo - length_sec
+    else:
+        span, dist = a_hi - t_hi, length_sec - t_hi
+    if span <= 0:
+        return TYPED_LENGTH_TARGET_SCORE
+    frac = min(1.0, dist / span)
+    return round(TYPED_LENGTH_TARGET_SCORE
+                 - (TYPED_LENGTH_TARGET_SCORE - TYPED_LENGTH_EDGE_SCORE) * frac, 1)
+
 # The niche keyword bank, grouped by theme. We match on theme words because
 # guests rarely say the exact SEO phrase, but they say the theme.
 KEYWORD_THEMES = {
@@ -292,7 +425,8 @@ def _tokens(text):
     return re.findall(r"[a-z']+", text.lower())
 
 
-def score_candidate(c):
+def score_candidate(c, clip_type="best"):
+    profile = TYPE_PROFILES.get(clip_type) or TYPE_PROFILES["best"]
     text = " ".join(s["text"] for s in c["sentences"])
     low = text.lower()
     toks = _tokens(text)
@@ -358,8 +492,17 @@ def score_candidate(c):
                 kw_weighted, best_kw = weighted, kw
     breakdown["keyword"] = min(int(kw_weighted * 2), 10)
 
-    # 6. Length discipline — shorter is better (completion rate).
-    breakdown["length"] = round(max(0, 10 - (c["length_sec"] - MIN_LEN_SEC) * 0.4), 1)
+    # 6. Length discipline. "best" keeps the legacy shorter-is-better curve
+    # (bit-identical); a typed job scores distance from ITS target band and
+    # rejects outside its allowed band (KH-CTP-001 length policy). The global
+    # 8s..35s hard limits still bound every candidate upstream.
+    if profile["target_band"] is None:
+        breakdown["length"] = round(max(0, 10 - (c["length_sec"] - MIN_LEN_SEC) * 0.4), 1)
+    else:
+        _len_score = typed_length_score(c["length_sec"], profile)
+        if _len_score is None:
+            return None  # outside this type's allowed band
+        breakdown["length"] = _len_score
 
     # Cliché penalty — kills motivational-only clips.
     cliche_hits = sum(1 for p in CLICHE_PHRASES if p in low)
@@ -381,16 +524,41 @@ def score_candidate(c):
     sensation_penalty = sum(4 for p in SENSATION_MARKERS if p in low)
     lead_with = "agency" if agency_hits >= 1 else "tragedy"
 
+    # KH-CTP-001 hard constraint: raw_moment only qualifies when the person is
+    # acting/deciding/mending (lead_with = agency). Type never weakens safety;
+    # this only ever REMOVES candidates from a typed job.
+    if profile["require_lead_with"] and lead_with != profile["require_lead_with"]:
+        return None
+
+    # Typed marker boosts + penalties (all tunables live in TYPE_PROFILES).
+    # "best" has none of these, so its total is the exact legacy arithmetic.
+    _marker_hits = {"turn": turn_hits, "agency": agency_hits, "emotion": emo_hits}
+    type_bonus = sum(min(per_hit * _marker_hits.get(mk, 0), cap)
+                     for mk, (per_hit, cap) in profile["marker_bonus"].items())
+    type_penalty = 0
+    if lead_with == "tragedy":
+        type_penalty += profile["tragedy_lead_penalty"]
+    _pnd = profile["proper_noun_density"]
+    if _pnd and toks:
+        if proper_nouns * 10.0 / len(toks) > _pnd[0]:
+            type_penalty += _pnd[1]
+    if profile["curiosity_bonus"]:
+        if hook.strip().endswith("?") or any(m in hook_low.split() for m in TURN_MARKERS):
+            type_bonus += profile["curiosity_bonus"]
+
+    w = profile["weights"]
     total = (
-        breakdown["hook"] * 2.0
-        + breakdown["hook4s"] * 2.5
-        + breakdown["turn"] * 1.5
-        + breakdown["keyword"] * 2.2
-        + breakdown["length"] * 1.0
-        + dignity_bonus
+        breakdown["hook"] * 2.0 * w["hook"]
+        + breakdown["hook4s"] * 2.5 * w["hook4s"]
+        + breakdown["turn"] * 1.5 * w["turn"]
+        + breakdown["keyword"] * 2.2 * w["keyword"]
+        + breakdown["length"] * 1.0 * w["length"]
+        + dignity_bonus * w["agency"]
+        + type_bonus
         - cliche_penalty
         - off_theme_penalty
         - sensation_penalty
+        - type_penalty
     )
     # normalise to roughly 0-100
     fit = max(0, min(100, round(total * 1.05)))
@@ -413,6 +581,7 @@ def score_candidate(c):
         "start": round(c["start"], 2),
         "end": round(c["end"], 2),
         "length_sec": c["length_sec"],
+        "clip_type": clip_type,            # the lens this candidate was scored under
         "archetype": archetype,
         "hook_line": hook,
         "matched_keyword": best_kw,
@@ -469,14 +638,21 @@ def suppress_overlaps(clips, max_overlap=0.5):
 # Public entry point
 # ======================================================================
 
-def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None):
+def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
+           clip_type="best", reviewer_anchors=None):
+    """`clip_type` (KH-CTP-001) picks the selection lens from TYPE_PROFILES;
+    "best" is bit-identical to the legacy scoring. `reviewer_anchors` is an
+    optional list of Episode Reviewer evidence quotes, passed to the Grok
+    judgment pass as ADVISORY anchors (never commands)."""
+    if clip_type not in TYPE_PROFILES:
+        clip_type = "best"                 # unknown type degrades to current behaviour
     data = json.loads(Path(transcript_path).read_text())
     words = data["words"]
     guest_speaker = identify_guest(words)
     sentences = build_sentences(words)
     candidates = build_candidates(sentences, guest_speaker)
 
-    scored = [s for s in (score_candidate(c) for c in candidates) if s]
+    scored = [s for s in (score_candidate(c, clip_type=clip_type) for c in candidates) if s]
     deduped = suppress_overlaps(scored)
     heuristic_ranked = sorted(deduped, key=lambda x: x["fit_score"], reverse=True)
 
@@ -494,7 +670,8 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None):
                 from . import rerank as rr      # imported as a package
             except ImportError:
                 import rerank as rr              # run as a script
-            picks = rr.rerank(shortlist, data.get("title", ""), top_n=top_n, usage_ctx=usage_ctx)
+            picks = rr.rerank(shortlist, data.get("title", ""), top_n=top_n, usage_ctx=usage_ctx,
+                              clip_type=clip_type, reviewer_anchors=reviewer_anchors)
             chosen = []
             for p in picks:
                 idx = p.get("index")
@@ -547,7 +724,7 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None):
     # BEYOND the shipped top_n. Persisted by the worker so a later "replace" can pick a
     # genuinely different unused moment without re-fetching/re-transcribing. Light fields
     # only (enough to cut + caption + write a fresh metadata pack).
-    POOL_FIELDS = ("start", "end", "length_sec", "archetype", "hook_line",
+    POOL_FIELDS = ("start", "end", "length_sec", "clip_type", "archetype", "hook_line",
                    "highlight_word", "fit_score", "lead_with", "safety",
                    "safety_note", "text")
     candidate_pool = [{k: c.get(k) for k in POOL_FIELDS} for c in heuristic_ranked[:40]]
@@ -555,6 +732,7 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None):
     return {
         "source": data.get("id"),
         "title": data.get("title"),
+        "clip_type": clip_type,
         "method": method,
         "llm_error": llm_error,
         "diarized": guest_speaker is not None,
@@ -574,6 +752,9 @@ def _fmt(t):
 
 def _print_report(result):
     print(f"\n[detect] {result['title']}")
+    if result.get("clip_type") and result["clip_type"] != "best":
+        print(f"[detect] clip type: {result['clip_type']} "
+              f"({TYPE_PROFILES[result['clip_type']]['label']})")
     if result.get("diarized"):
         print(f"[detect] speaker labelling ON — guest = speaker {result['guest_speaker']} "
               f"(clips built from guest lines only)")
@@ -614,20 +795,36 @@ def _print_report(result):
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:]]
     use_llm = "--no-llm" not in args
+    consumed = set()          # indexes of flag VALUES, so they never read as paths
     count = TOP_N
     if "--count" in args:
         ci = args.index("--count")
         if ci + 1 < len(args):
             count = int(args[ci + 1])
-    paths = [a for a in args if not a.startswith("--") and not a.isdigit()]
+            consumed.add(ci + 1)
+    clip_type = "best"
+    if "--type" in args:
+        ti = args.index("--type")
+        if ti + 1 < len(args):
+            clip_type = args[ti + 1]
+            consumed.add(ti + 1)
+        if clip_type not in TYPE_PROFILES:
+            print(f"Unknown --type {clip_type!r}. One of: {', '.join(TYPE_PROFILES)}")
+            sys.exit(1)
+    paths = [a for i, a in enumerate(args)
+             if not a.startswith("--") and not a.isdigit() and i not in consumed]
     if not paths:
-        print("Usage: python src/detect.py output/<id>.transcript.json [--no-llm] [--count N]")
+        print("Usage: python src/detect.py output/<id>.transcript.json "
+              "[--no-llm] [--count N] [--type best|turning_point|hero_today|"
+              "raw_moment|universal_truth|story_teaser]")
         sys.exit(1)
 
     tpath = paths[0]
+    if clip_type != "best":
+        print(f"[detect] clip type lens: {clip_type}")
     if use_llm:
         print("[detect] running Grok judgment pass (use --no-llm to skip)...")
-    result = detect(tpath, use_llm=use_llm, top_n=count)
+    result = detect(tpath, use_llm=use_llm, top_n=count, clip_type=clip_type)
     _print_report(result)
 
     out_path = Path(str(tpath).replace(".transcript.json", ".clips.json"))

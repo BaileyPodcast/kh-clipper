@@ -374,7 +374,16 @@ def upload_outputs(job_id, result):
             "series": result.get("series"), "guest_name": result.get("guest_name"),
             "clips": clips, "review": review,
             # Brief 2: which transcription path ran (reuse_assemblyai | grok_stt | whisperx).
-            "transcript_source": result.get("transcript_source")}
+            "transcript_source": result.get("transcript_source"),
+            # KH-CTP-001: the job's selection lens, echoed at job level too
+            # (every clips[] entry also carries its own clip_type).
+            "clip_type": result.get("clip_type", "best"),
+            # KH-MGX-001 defect fix: caption_style was never persisted into
+            # outputs, so process_clip_job's outputs.get("caption_style")
+            # always fell back to "classic" and a kinetic job's reframe/replace
+            # silently re-rendered classic. Persist it so per-clip ops keep the
+            # style the job was rendered with.
+            "caption_style": result.get("caption_style", "classic")}
 
 
 # ----------------------------------------------------------------------
@@ -466,7 +475,8 @@ def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None)
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
                 guest_name: str = None, transcript: dict = None, moments: list = None,
-                caption_style: str = "classic"):
+                caption_style: str = "classic", clip_type: str = "best",
+                reviewer_anchors: list = None):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -499,6 +509,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 make_audiogram=audiogram, progress_cb=progress, output_root="/tmp/job",
                 reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
                 moments=moments, caption_style=caption_style,
+                clip_type=clip_type, reviewer_anchors=reviewer_anchors,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": file_id},
             )
         else:
@@ -508,6 +519,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 progress_cb=progress, output_root="/tmp/job", reframe_mode=reframe,
                 guest_name=guest_name, transcript=tpath, moments=moments,
                 caption_style=caption_style,
+                clip_type=clip_type, reviewer_anchors=reviewer_anchors,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": _youtube_id(url)},
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
@@ -710,6 +722,8 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 "why": target.get("why", ""), "safety": target.get("safety", "ok"),
                 "safety_note": target.get("safety_note", ""),
                 "highlight_word": target.get("highlight_word", ""),   # KH-MGX-001 1.2
+                # KH-CTP-001: the type survives a reframe unchanged.
+                "clip_type": target.get("clip_type") or outputs.get("clip_type") or "best",
                 "metadata": target.get("metadata") or {},   # keep captions/banner stable
             }
             rendered = clipper.render_clip(
@@ -760,6 +774,9 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 "why": "", "safety": pick.get("safety", "ok"),
                 "safety_note": pick.get("safety_note", ""), "text": pick.get("text", ""),
                 "highlight_word": pick.get("highlight_word", ""),   # KH-MGX-001 1.2
+                # KH-CTP-001: the pool entry was scored under the job's type;
+                # carry it so the fresh metadata pack keeps the same lens.
+                "clip_type": pick.get("clip_type") or outputs.get("clip_type") or "best",
             }
             rendered = clipper.render_clip(
                 spec, url=url, words_all=words_all, series=series, guest_name=guest_name,
@@ -999,6 +1016,20 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         if err:
             raise fastapi.HTTPException(status_code=400, detail=f"invalid moments: {err}")
 
+    # KH-CTP-001: the clip type lens (default "best" = current behaviour).
+    # Validated against TYPE_PROFILES (the single source of truth) so a typo
+    # fails fast instead of silently degrading mid-render. reviewer_anchors is
+    # an optional list of Episode Reviewer evidence quotes (advisory only).
+    clip_type = str(payload.get("clip_type") or "best")
+    import sys as _sys2
+    _sys2.path.insert(0, "/root")
+    from src import detect as _detect_mod
+    if clip_type not in _detect_mod.TYPE_PROFILES:
+        raise fastapi.HTTPException(status_code=400, detail=f"unknown clip_type {clip_type!r}")
+    reviewer_anchors = payload.get("reviewer_anchors")
+    if reviewer_anchors is not None and not isinstance(reviewer_anchors, list):
+        raise fastapi.HTTPException(status_code=400, detail="reviewer_anchors must be a list")
+
     process_job.spawn(
         payload["job_id"], payload["url"], payload.get("series"),
         int(payload.get("count", 5)), bool(payload.get("audiogram", True)),
@@ -1017,5 +1048,9 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         # Not in the contract yet (kh-studio doesn't send this field today) —
         # defaults to classic so every existing caller is unaffected.
         str(payload.get("caption_style") or "classic"),
+        # KH-CTP-001: the selection lens ("best" = unchanged behaviour) + the
+        # optional advisory Episode Reviewer anchors for typed jobs.
+        clip_type,
+        reviewer_anchors,
     )
     return {"accepted": True, "job_id": payload["job_id"]}
