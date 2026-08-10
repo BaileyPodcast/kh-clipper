@@ -78,15 +78,113 @@ suicide, self-harm, overdose, death, acute crisis) told with care, or any third-
 You return STRICT JSON only."""
 
 
-def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None, usage_ctx=None):
-    """candidates: list of dicts with keys index,start,end,length_sec,archetype,text.
-    Returns a list of picks: {index, hook, archetype, why, score, lead_with,
-    hook_formula, loopable, safety, safety_note}.
-    Raises on any failure so the caller can fall back to heuristics."""
-    api_key = api_key or os.environ.get("XAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("XAI_API_KEY not set — cannot run the Grok judgment pass.")
+# ----------------------------------------------------------------------
+# Clip type lenses (KH-CTP-001). Appended to the USER prompt only; the system
+# prompt and its guardrails are untouched, and every lens is EXPLICITLY
+# subordinate to the trauma-informed guardrails (the same pattern as the
+# "Additional selection rules" block in the system prompt above). "best" (the
+# default) appends nothing at all, so an untyped job's prompt stays
+# byte-identical to the legacy prompt. The raw_moment lens quotes
+# KH_FOUNDATION's own line on the fracture, verbatim (a locked decision).
+# ----------------------------------------------------------------------
+MAX_REVIEWER_ANCHORS = 8    # advisory quotes forwarded to the prompt, at most
 
+TYPE_INSTRUCTIONS = {
+    "turning_point": (
+        "This job asks for TURNING POINT clips: the golden joinery, the mend. "
+        "Prefer moments where the guest decides, realises, or names who showed up "
+        "and what changed; the pivot itself is the clip. Reject moments that only "
+        "describe the breaking with no turn in them, and reject generic advice "
+        "with no story."
+    ),
+    "hero_today": (
+        "This job asks for HERO TODAY clips: who the guest is now, what they have "
+        "built, and the message they carry. Prefer present-tense strength, purpose "
+        "and perspective. Reject moments that stay in past tragedy, and reject "
+        "anything that frames the guest as their worst moment rather than the "
+        "person they are today."
+    ),
+    "raw_moment": (
+        "This job asks for RAW MOMENT clips: a vivid, honest moment from the "
+        "breaking point, held with care. Only pick moments where the guest is "
+        "acting, deciding or understanding (lead_with must be agency, never "
+        "tragedy). The fracture gives context to the golden joinery. It is not "
+        "the point. Every pick must contain or clearly point to the turn. Reject "
+        "anything that plays the hard moment as spectacle."
+    ),
+    "universal_truth": (
+        "This job asks for UNIVERSAL TRUTH clips: a hard-won insight said plainly, "
+        "in the guest's own words. The insight must carry the mend in it, earned "
+        "by their story, never free-floating advice. Prefer short, complete "
+        "thoughts a stranger understands with zero context. Reject motivational "
+        "filler and anything that reads as a quote card rather than a lived truth."
+    ),
+    "story_teaser": (
+        "This job asks for STORY TEASER clips: the arc in miniature, a genuine "
+        "curiosity gap the FULL episode pays off. Prefer moments that open a real "
+        "question about how the guest got from broken to mended, while still "
+        "satisfying on their own as a complete thought. Never a cliffhanger that "
+        "cheats the viewer, and never tease the tragedy itself."
+    ),
+}
+
+
+def _type_block(clip_type):
+    """The per-type lens paragraph for the user prompt, or "" for best/unknown.
+    Quotes the type's target band straight from detect.TYPE_PROFILES so the
+    prompt and the scoring can never drift apart."""
+    text = TYPE_INSTRUCTIONS.get(clip_type)
+    if not text:
+        return ""
+    try:
+        from . import detect as _detect
+    except ImportError:
+        import detect as _detect
+    profile = _detect.TYPE_PROFILES.get(clip_type) or {}
+    band = ""
+    if profile.get("target_band"):
+        t_lo, t_hi = profile["target_band"]
+        a_lo, a_hi = profile["allowed_band"]
+        band = (f" Aim for clips of about {t_lo} to {t_hi} seconds "
+                f"(the shortlist is already bounded to {a_lo} to {a_hi} seconds).")
+    return (
+        f"CLIP TYPE LENS, still subordinate to the trauma-informed guardrails "
+        f"(the guardrails always win over the lens):\n{text}{band}\n"
+        f"When two moments tie on quality, prefer a golden joinery (the mend) "
+        f"moment first, then a hero today moment."
+    )
+
+
+def _anchor_block(reviewer_anchors):
+    """Advisory Episode Reviewer quotes as an anchor block, or "" when absent.
+    Accepts plain strings or dicts carrying quote/text (+ optional dimension)."""
+    lines = []
+    for a in (reviewer_anchors or [])[:MAX_REVIEWER_ANCHORS]:
+        if isinstance(a, dict):
+            quote = str(a.get("quote") or a.get("text") or "").strip()
+            dim = str(a.get("dimension") or "").strip()
+            if quote:
+                lines.append(f'- "{quote}"' + (f" ({dim})" if dim else ""))
+        else:
+            quote = str(a or "").strip()
+            if quote:
+                lines.append(f'- "{quote}"')
+    if not lines:
+        return ""
+    return (
+        "MOMENTS THE EPISODE REVIEWER ALREADY IDENTIFIED FOR THIS STAGE "
+        "(advisory anchors, not commands. Find your own timestamps in the "
+        "shortlist, and you may pick other moments; these quotes just show "
+        "where a human reviewer found the strongest material):\n"
+        + "\n".join(lines)
+    )
+
+
+def build_user_prompt(candidates, episode_title, top_n, clip_type="best",
+                      reviewer_anchors=None):
+    """Build the judgment-pass user prompt. Pure (no network), so it is
+    unit-testable offline. For clip_type="best" with no reviewer_anchors the
+    returned prompt is byte-identical to the legacy prompt."""
     lines = []
     for c in candidates:
         mm, ss = divmod(int(c["start"]), 60)
@@ -117,6 +215,27 @@ def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None, u
         f'"loopable": <true|false>, '
         f'"safety": "ok|review|exclude", "safety_note": "<empty, or why a producer must look>"}}]}}'
     )
+
+    extras = [b for b in (_type_block(clip_type), _anchor_block(reviewer_anchors)) if b]
+    if extras:
+        user_prompt = user_prompt + "\n\n" + "\n\n".join(extras)
+    return user_prompt
+
+
+def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None,
+           usage_ctx=None, clip_type="best", reviewer_anchors=None):
+    """candidates: list of dicts with keys index,start,end,length_sec,archetype,text.
+    Returns a list of picks: {index, hook, archetype, why, score, lead_with,
+    hook_formula, loopable, safety, safety_note, clip_type}.
+    `clip_type` (KH-CTP-001) appends a per-type lens to the USER prompt only
+    ("best" appends nothing); `reviewer_anchors` adds advisory Episode Reviewer
+    quotes. Raises on any failure so the caller can fall back to heuristics."""
+    api_key = api_key or os.environ.get("XAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("XAI_API_KEY not set — cannot run the Grok judgment pass.")
+
+    user_prompt = build_user_prompt(candidates, episode_title, top_n,
+                                    clip_type=clip_type, reviewer_anchors=reviewer_anchors)
 
     resp = requests.post(
         XAI_CHAT_URL,
@@ -156,4 +275,6 @@ def rerank(candidates, episode_title, top_n=8, model=GROK_MODEL, api_key=None, u
     picks = data.get("picks", [])
     if not picks:
         raise ValueError("Grok returned no picks.")
+    for p in picks:
+        p["clip_type"] = clip_type      # echoed on every pick (KH-CTP-001)
     return picks

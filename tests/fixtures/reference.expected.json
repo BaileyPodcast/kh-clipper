@@ -1,0 +1,194 @@
+{
+ "n_candidates": 174,
+ "n_passed_gate": 174,
+ "clips": [
+  {
+   "start": 37.63,
+   "end": 52.52,
+   "length_sec": 14.9,
+   "fit_score": 85,
+   "hook_line": "I realised the fear was never mine to carry.",
+   "lead_with": "agency",
+   "archetype": "Moment",
+   "hook4s": 10,
+   "safety": "ok",
+   "score_breakdown": {
+    "hook": 10,
+    "hook4s": 10,
+    "turn": 8,
+    "keyword": 5,
+    "length": 7.2,
+    "agency": 6
+   }
+  },
+  {
+   "start": 128.77,
+   "end": 160.13,
+   "length_sec": 31.4,
+   "fit_score": 80,
+   "hook_line": "Panic used to trap me inside the house for days.",
+   "lead_with": "agency",
+   "archetype": "Story Teaser",
+   "hook4s": 10,
+   "safety": "review",
+   "score_breakdown": {
+    "hook": 7,
+    "hook4s": 10,
+    "turn": 10,
+    "keyword": 7,
+    "length": 0.6,
+    "agency": 6
+   }
+  },
+  {
+   "start": 4.35,
+   "end": 16.41,
+   "length_sec": 12.1,
+   "fit_score": 72,
+   "hook_line": "I was terrified every single day for 10 years.",
+   "lead_with": "tragedy",
+   "archetype": "Moment",
+   "hook4s": 8,
+   "safety": "ok",
+   "score_breakdown": {
+    "hook": 7,
+    "hook4s": 8,
+    "turn": 10,
+    "keyword": 5,
+    "length": 8.4,
+    "agency": 0
+   }
+  },
+  {
+   "start": 101.53,
+   "end": 132.51,
+   "length_sec": 31.0,
+   "fit_score": 72,
+   "hook_line": "I would tell them the darkness lies to you.",
+   "lead_with": "agency",
+   "archetype": "Story Teaser",
+   "hook4s": 6,
+   "safety": "ok",
+   "score_breakdown": {
+    "hook": 7,
+    "hook4s": 6,
+    "turn": 10,
+    "keyword": 8,
+    "length": 0.8,
+    "agency": 6
+   }
+  },
+  {
+   "start": 17.02,
+   "end": 43.82,
+   "length_sec": 26.8,
+   "fit_score": 71,
+   "hook_line": "The shame followed me into every job I ever had.",
+   "lead_with": "agency",
+   "archetype": "Story Teaser",
+   "hook4s": 6,
+   "safety": "ok",
+   "score_breakdown": {
+    "hook": 7,
+    "hook4s": 6,
+    "turn": 10,
+    "keyword": 7,
+    "length": 2.5,
+    "agency": 6
+   }
+  }
+ ],
+ "candidate_pool": [
+  {
+   "start": 37.63,
+   "end": 52.52,
+   "length_sec": 14.9,
+   "fit_score": 85,
+   "lead_with": "agency"
+  },
+  {
+   "start": 128.77,
+   "end": 160.13,
+   "length_sec": 31.4,
+   "fit_score": 80,
+   "lead_with": "agency"
+  },
+  {
+   "start": 4.35,
+   "end": 16.41,
+   "length_sec": 12.1,
+   "fit_score": 72,
+   "lead_with": "tragedy"
+  },
+  {
+   "start": 101.53,
+   "end": 132.51,
+   "length_sec": 31.0,
+   "fit_score": 72,
+   "lead_with": "agency"
+  },
+  {
+   "start": 17.02,
+   "end": 43.82,
+   "length_sec": 26.8,
+   "fit_score": 71,
+   "lead_with": "agency"
+  },
+  {
+   "start": 12.29,
+   "end": 20.76,
+   "length_sec": 8.5,
+   "fit_score": 65,
+   "lead_with": "tragedy"
+  },
+  {
+   "start": 89.24,
+   "end": 109.24,
+   "length_sec": 20.0,
+   "fit_score": 63,
+   "lead_with": "agency"
+  },
+  {
+   "start": 84.89,
+   "end": 93.36,
+   "length_sec": 8.5,
+   "fit_score": 56,
+   "lead_with": "tragedy"
+  },
+  {
+   "start": 48.78,
+   "end": 56.87,
+   "length_sec": 8.1,
+   "fit_score": 53,
+   "lead_with": "agency"
+  },
+  {
+   "start": 69.39,
+   "end": 80.31,
+   "length_sec": 10.9,
+   "fit_score": 41,
+   "lead_with": "tragedy"
+  },
+  {
+   "start": 76.95,
+   "end": 88.63,
+   "length_sec": 11.7,
+   "fit_score": 25,
+   "lead_with": "tragedy"
+  },
+  {
+   "start": 53.13,
+   "end": 64.43,
+   "length_sec": 11.3,
+   "fit_score": 11,
+   "lead_with": "tragedy"
+  },
+  {
+   "start": 61.45,
+   "end": 72.75,
+   "length_sec": 11.3,
+   "fit_score": 4,
+   "lead_with": "tragedy"
+  }
+ ]
+}

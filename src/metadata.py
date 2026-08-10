@@ -50,6 +50,29 @@ ANTHROPIC_MODEL = "claude-haiku-4-5"
 # the assembled copy). tags/hashtags come from the locked packaging module.
 METADATA_FIELDS = ("title", "description", "pinned_comment", "banner_hook")
 
+# KH-CTP-001: one-line tone hints per clip type, fed to the CREATIVE SLOTS only.
+# The locked v5 scaffolding assembled by packaging.py is untouched. "best" (the
+# default) adds no line at all, so an untyped job's prompt is unchanged.
+TYPE_TONE_HINTS = {
+    "turning_point": ("Tone for this job: these clips are turning points. Centre the "
+                      "decision or realisation that changed things, warm and grounded."),
+    "hero_today": ("Tone for this job: these clips show who the guest is today. Lean "
+                   "warmth and quiet pride in what they have built."),
+    "raw_moment": ("Tone for this job: these clips hold a hard moment with care. "
+                   "Steady, dignified copy, never dramatic."),
+    "universal_truth": ("Tone for this job: these clips carry a hard-won insight. "
+                        "Plain, direct copy that lets the guest's own words land."),
+    "story_teaser": ("Tone for this job: these clips tease the full episode. Lean "
+                     "honest curiosity and open a question the episode answers."),
+}
+
+
+def tone_hint_line(clip_type):
+    """The one-line tone hint for a typed job, newline-terminated, or "" for
+    best/unknown (prompt unchanged). Pure, so it is unit-testable offline."""
+    hint = TYPE_TONE_HINTS.get(clip_type or "best")
+    return f"{hint}\n" if hint else ""
+
 # The Grok call now fills ONLY the creative slots; packaging.py assembles the locked
 # v5 scaffolding (7-part description, 15 hashtags in order, 3-group tags, links,
 # blurbs, cadence) around them, so a worker-packaged Short matches an app-packaged
@@ -157,13 +180,16 @@ def _extract_packs(text):
 
 
 def generate(clips, episode_title, episode_url, handle=None,
-             model=ANTHROPIC_MODEL, api_key=None, guest_name=None, series=None, usage_ctx=None):
+             model=ANTHROPIC_MODEL, api_key=None, guest_name=None, series=None,
+             usage_ctx=None, clip_type="best"):
     """Attach a `metadata` dict to each clip (in place) and return the clips.
     Raises on any failure so the caller can fall back to no-metadata.
 
     `guest_name` (when known) is the real guest's name; Grok uses it naturally in
     the title/context/pinned instead of "our guest". `series` is the worker series
-    slug, used to build the series-correct hashtags, tags and blurb."""
+    slug, used to build the series-correct hashtags, tags and blurb. `clip_type`
+    (KH-CTP-001) adds a one-line tone hint to the creative slots; "best" adds
+    nothing and the locked packaging scaffolding is never touched either way."""
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not set, cannot generate the metadata pack.")
@@ -182,6 +208,7 @@ def generate(clips, episode_title, episode_url, handle=None,
     user_prompt = (
         f'Episode: "{episode_title}"\n'
         f"{guest_line}"
+        f"{tone_hint_line(clip_type)}"
         f"Here are the {len(clips)} clips, each with an [index]:\n\n{blocks}\n\n"
         f'Return JSON exactly like: {{"packs": [{{"index": <int>, '
         f'"title": "<short hook title>", "hook_seo_line": "<under 150 chars>", '

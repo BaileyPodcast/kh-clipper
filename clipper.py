@@ -101,7 +101,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
         use_llm=True, max_sec=35.0, safe_only=False, count=5, make_audiogram=False,
         series=None, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
-        guest_name=None, moments=None, usage_ctx=None, caption_style="classic"):
+        guest_name=None, moments=None, usage_ctx=None, caption_style="classic",
+        clip_type="best", reviewer_anchors=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -148,6 +149,10 @@ def run(url=None, provider="grok", transcript=None, source=None,
         print(f"[2/5] Exact-cut: rendering {len(moments)} approved moment(s)")
         clips = moments_mod.build_moment_clips(
             tdata, moments, max_sec=max_sec, episode_id=episode_id)
+        # KH-CTP-001: stamp the job's clip type on exact-cut clips too, so the
+        # metadata pack and the echoed outputs carry it (brief section C).
+        for c in clips:
+            c["clip_type"] = clip_type
         result = {"clips": clips, "title": tdata.get("title", ""),
                   "candidate_pool": [], "source": "exact_cut"}
         json.dump(result, open(cpath, "w"), indent=2)
@@ -159,7 +164,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
         _p("detect", 35, "finding Kintsugi moments")
         print(f"[2/5] Detecting Kintsugi moments (top {count})"
               + ("" if use_llm else " (heuristic only)"))
-        result = detect.detect(tpath, use_llm=use_llm, top_n=count, usage_ctx=usage_ctx)
+        result = detect.detect(tpath, use_llm=use_llm, top_n=count, usage_ctx=usage_ctx,
+                               clip_type=clip_type, reviewer_anchors=reviewer_anchors)
         json.dump(result, open(cpath, "w"), indent=2)
         n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
         print(f"      {len(result['clips'])} moments ({n_ok} ok, "
@@ -182,7 +188,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
             ep_url = ""
             metadata.generate(result["clips"],
                               result.get("title") or tdata.get("title", ""), ep_url,
-                              guest_name=guest_name, series=series, usage_ctx=usage_ctx)
+                              guest_name=guest_name, series=series, usage_ctx=usage_ctx,
+                              clip_type=clip_type)
             json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
             n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
             print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
@@ -202,7 +209,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
                 "series": series, "guest_name": guest_name, "clips": [],
                 "review_md_path": None, "transcript_path": tpath,
                 "candidate_pool": result.get("candidate_pool", []),
-                "transcript_source": transcript_source, "caption_style": caption_style}
+                "transcript_source": transcript_source, "caption_style": caption_style,
+                "clip_type": clip_type}
     words_all = tdata["words"]
 
     # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
@@ -301,6 +309,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             "start": cut_for.get("start", clip.get("start")),
             "end": cut_for.get("end", clip.get("end")),
             "length_sec": cut_for.get("duration", clip.get("length_sec")),
+            "clip_type": clip.get("clip_type", clip_type),   # echoed on every clip (KH-CTP-001)
             "archetype": clip.get("archetype"),
             "hook_line": clip.get("hook_line"),
             "why": clip.get("why", ""),
@@ -324,6 +333,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
         "candidate_pool": result.get("candidate_pool", []),
         "transcript_source": transcript_source,   # reuse_assemblyai | grok_stt | whisperx
         "caption_style": caption_style,      # classic (libass) | kinetic (Remotion, Wave 2)
+        "clip_type": clip_type,              # the selection lens this job ran under (KH-CTP-001)
     }
 
 
@@ -363,7 +373,9 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
                     "archetype": spec.get("archetype", ""),
                     "why": spec.get("why", ""), "text": spec.get("text", ""),
                     "safety": spec.get("safety", "ok")}]
-            metadata.generate(one, episode_title, episode_url, guest_name=guest_name, series=series, usage_ctx=usage_ctx)
+            metadata.generate(one, episode_title, episode_url, guest_name=guest_name,
+                              series=series, usage_ctx=usage_ctx,
+                              clip_type=spec.get("clip_type", "best"))
             meta = one[0].get("metadata", meta)
         except Exception as e:
             print(f"      ! metadata pack skipped: {str(e)[:160]}")
@@ -407,6 +419,7 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
         "start": round(start, 2),
         "end": round(end, 2),
         "length_sec": round(end - start, 1),
+        "clip_type": spec.get("clip_type", "best"),   # stable across reframe/replace
         "archetype": spec.get("archetype"),
         "hook_line": spec.get("hook_line"),
         "why": spec.get("why", ""),
