@@ -79,7 +79,10 @@ def run(clips_json: str, source: str | None = None, safe_only: bool = False,
     if not source:
         sid = clips[0].get("source_video_id") if clips else data.get("source")
         if not sid:
-            raise SystemExit("No --source file and no source_video_id in clips.json")
+            # RuntimeError, not SystemExit: SystemExit is a BaseException, so the
+            # worker's `except Exception` never caught it — the job died silently
+            # and hung at the cut stage until the stall watchdog expired it.
+            raise RuntimeError("No --source file and no source_video_id in clips.json")
         url = f"https://www.youtube.com/watch?v={sid}"
 
     cuts, skipped = [], []

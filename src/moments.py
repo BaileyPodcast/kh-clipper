@@ -132,5 +132,10 @@ def build_moment_clips(tdata, moments, max_sec=MAX_CLIP_SEC, episode_id=None):
             "consent_ok": False,
             "text": text,
             "source": "exact_cut",
+            # cut.py rebuilds the remote download URL from this id. detect.py
+            # stamps it on auto-selected clips; exact-cut clips must carry it
+            # too or the cut stage has no source to pull from (the bulk-drop
+            # 100%-failure bug: every exact-cut render died at the cut stage).
+            "source_video_id": tdata.get("id"),
         })
     return clips

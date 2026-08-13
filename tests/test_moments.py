@@ -78,6 +78,15 @@ def test_skips_a_window_with_no_words_never_invents_content():
     assert clips == []
 
 
+def test_stamps_source_video_id_so_cut_can_download():
+    # The bulk-drop bug: without source_video_id on each clip, cut.run has no
+    # source to rebuild the download URL from and every exact-cut render dies
+    # at the cut stage. The transcript id IS the video id on the YouTube path.
+    td = _tdata("a story about rebuilding after everything fell apart at once")
+    clips = moments.build_moment_clips(td, [{"start": 0.0, "end": 8.0}])
+    assert clips[0]["source_video_id"] == "vid123"
+
+
 def test_uses_supplied_hook_line_when_given():
     td = _tdata("the day I decided to start again from nothing at all")
     clips = moments.build_moment_clips(td, [{"start": 0.0, "end": 8.0, "hook_line": "Starting again"}])
