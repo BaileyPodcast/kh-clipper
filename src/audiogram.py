@@ -603,7 +603,8 @@ def _caption_from_words(words, limit=14):
 
 
 def render(clip_in, words, out_base, series=None, here=None,
-           caption=None, title=None, guest_name=None, ep_label=None):
+           caption=None, title=None, guest_name=None, ep_label=None,
+           timed_captions=False):
     """Render the KH design-suite audiograms for a clip (square + vertical) as MP4.
     Returns the list of output paths. Output keys/paths are unchanged from before:
     <out_base>_audiogram_square.mp4 and <out_base>_audiogram_vertical.mp4.
@@ -612,12 +613,24 @@ def render(clip_in, words, out_base, series=None, here=None,
     title      — short content title for the footer
     guest_name — hero name for the footer "with ..." line (omitted when None)
     ep_label   — optional "EP 14" tag (omitted when None; the suite default is empty)
+    timed_captions — False (default, unchanged): one static caption line for the
+            whole clip, exactly as every existing Shorts audiogram renders today.
+            True: the caption slot swaps per line as `words` plays (same
+            group_caption_lines() timing render_landscape() already uses) — for
+            the standalone longer-form audiogram job, where a single static line
+            for a multi-minute clip would go stale. Opt-in only so no existing
+            caller's output changes.
     """
     here = here or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     pal = palette_for(series)
     eyebrow = SERIES_LABEL.get((series or "").strip().lower(), series or "Kintsugi Heroes")
     cap = _kh_voice(caption) or _caption_from_words(words)
     bars = _seeded_bars(pal["seed"])
+
+    timed = None
+    if timed_captions and words:
+        timed = [c for c in group_caption_lines(words) if _kh_voice(c["text"])]
+        timed = timed or None
 
     sq = f"{out_base}_audiogram_square.mp4"
     vt = f"{out_base}_audiogram_vertical.mp4"
@@ -629,10 +642,12 @@ def render(clip_in, words, out_base, series=None, here=None,
     amps = _band_amps(pcm, 22050, nframes) if pcm is not None else None
 
     _render(clip_in, sq, SQUARE, pal, here, caption=cap, title=title or "",
-            guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps)
+            guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps,
+            timed_lines=timed)
     print(f"  audiogram {os.path.basename(sq)}")
     _render(clip_in, vt, VERTICAL, pal, here, caption=cap, title=title or "",
-            guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps)
+            guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps,
+            timed_lines=timed)
     print(f"  audiogram {os.path.basename(vt)}")
     return [sq, vt]
 

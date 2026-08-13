@@ -164,6 +164,29 @@ TYPE_PROFILES = {
     },
 }
 
+# ----------------------------------------------------------------------
+# KH-AUD-001: standalone longer-form audiogram duration presets (worker
+# action="audiogram"). Each preset's `band_override` widens candidate-window
+# building + length scoring for a `detect()` call WELL past the Shorts 35s
+# ceiling — every other TYPE_PROFILES tunable (weights, markers, hard
+# constraints) still applies unchanged for whichever clip_type lens is picked.
+# target_band aims near the top of the preset (a full-length audiogram, not a
+# padded-out short one); allowed_band gives room below when nothing in the
+# episode cleanly reaches the target length.
+AUDIOGRAM_DURATION_PRESETS = {
+    30:  {"target_band": (24, 30), "allowed_band": (18, 30)},
+    60:  {"target_band": (48, 60), "allowed_band": (35, 60)},
+    90:  {"target_band": (72, 90), "allowed_band": (55, 90)},
+    120: {"target_band": (95, 120), "allowed_band": (75, 120)},
+}
+
+
+def audiogram_band_override(duration_sec):
+    """(target_band, allowed_band) for a KH-AUD-001 duration preset, or None for
+    an unrecognised value (caller should reject/default rather than guess)."""
+    preset = AUDIOGRAM_DURATION_PRESETS.get(duration_sec)
+    return (preset["target_band"], preset["allowed_band"]) if preset else None
+
 
 def typed_length_score(length_sec, profile):
     """Length score for a TYPED job: best inside the target band, degrading
@@ -388,7 +411,12 @@ def trim_opener(sentence):
     return _make_sentence(words[keep_from:])
 
 
-def build_candidates(sentences, guest_speaker=None):
+def build_candidates(sentences, guest_speaker=None, min_len_sec=None, max_len_sec=None):
+    """min_len_sec/max_len_sec default to the Shorts hard limits (MIN_LEN_SEC/
+    MAX_LEN_SEC) — pass wider values ONLY for a non-Shorts caller (KH-AUD-001's
+    longer-form audiogram job); every existing caller is unaffected."""
+    lo = MIN_LEN_SEC if min_len_sec is None else min_len_sec
+    hi = MAX_LEN_SEC if max_len_sec is None else max_len_sec
     candidates = []
     for i in range(len(sentences)):
         # If we know who the guest is, only open clips on the guest's lines.
@@ -401,9 +429,9 @@ def build_candidates(sentences, guest_speaker=None):
         for j in range(i, len(sentences)):
             end = sentences[j]["end"]
             dur = end - start
-            if dur < MIN_LEN_SEC:
+            if dur < lo:
                 continue
-            if dur > MAX_LEN_SEC:
+            if dur > hi:
                 break
             # Use the trimmed opener as sentence[0] so the hook line, the start time
             # and the 4s window all begin on the guest's first real word.
@@ -425,8 +453,21 @@ def _tokens(text):
     return re.findall(r"[a-z']+", text.lower())
 
 
-def score_candidate(c, clip_type="best"):
+def score_candidate(c, clip_type="best", band_override=None):
+    """band_override — optional (target_band, allowed_band) pair that REPLACES the
+    type profile's own bands for the length-scoring step only (everything else
+    about the type's lens — weights, markers, hard constraints — is unchanged).
+    None (default) = the type's own Shorts-tuned bands, unchanged behaviour.
+    Used by the standalone longer-form audiogram job (KH-AUD-001) so a clip_type
+    lens like `turning_point` can still be used at 60-120s instead of being
+    rejected outright by its 12-30s Shorts allowed_band. `best`'s legacy curve
+    (target_band is None) is likewise overridden to a target-band curve when
+    band_override is given, since the short-is-better curve isn't meaningful at
+    a multi-minute length."""
     profile = TYPE_PROFILES.get(clip_type) or TYPE_PROFILES["best"]
+    if band_override is not None:
+        profile = dict(profile)
+        profile["target_band"], profile["allowed_band"] = band_override
     text = " ".join(s["text"] for s in c["sentences"])
     low = text.lower()
     toks = _tokens(text)
@@ -639,20 +680,28 @@ def suppress_overlaps(clips, max_overlap=0.5):
 # ======================================================================
 
 def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
-           clip_type="best", reviewer_anchors=None):
+           clip_type="best", reviewer_anchors=None, band_override=None):
     """`clip_type` (KH-CTP-001) picks the selection lens from TYPE_PROFILES;
     "best" is bit-identical to the legacy scoring. `reviewer_anchors` is an
     optional list of Episode Reviewer evidence quotes, passed to the Grok
-    judgment pass as ADVISORY anchors (never commands)."""
+    judgment pass as ADVISORY anchors (never commands). `band_override`
+    (KH-AUD-001) — optional (target_band, allowed_band) pair; when given, both
+    candidate-window building and scoring use it instead of the Shorts 8-35s
+    limits and the type's own Shorts-tuned band. None (default) = unchanged
+    Shorts behaviour."""
     if clip_type not in TYPE_PROFILES:
         clip_type = "best"                 # unknown type degrades to current behaviour
     data = json.loads(Path(transcript_path).read_text())
     words = data["words"]
     guest_speaker = identify_guest(words)
     sentences = build_sentences(words)
-    candidates = build_candidates(sentences, guest_speaker)
+    min_len, max_len = (None, None) if band_override is None else (
+        band_override[1][0], band_override[1][1])
+    candidates = build_candidates(sentences, guest_speaker,
+                                  min_len_sec=min_len, max_len_sec=max_len)
 
-    scored = [s for s in (score_candidate(c, clip_type=clip_type) for c in candidates) if s]
+    scored = [s for s in (score_candidate(c, clip_type=clip_type, band_override=band_override)
+                          for c in candidates) if s]
     deduped = suppress_overlaps(scored)
     heuristic_ranked = sorted(deduped, key=lambda x: x["fit_score"], reverse=True)
 

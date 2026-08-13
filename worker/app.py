@@ -160,6 +160,27 @@ def patch_video_job(job_id, fields):
         print(f"patch_video_job failed: {e}")
 
 
+def patch_audiogram_job(job_id, fields):
+    """PATCH a studio_audiogram_jobs row (service role bypasses RLS). Never raises.
+    Columns: status, stage, progress, message, error, moment_start_sec,
+    moment_end_sec, output_square_url, output_vertical_url."""
+    import json as _json
+    import requests
+    try:
+        body = _json.dumps(fields, ensure_ascii=True)
+        r = requests.patch(
+            f"{_sb_url()}/rest/v1/studio_audiogram_jobs",
+            headers=_sb_headers({"Content-Type": "application/json",
+                                 "Prefer": "return=minimal"}),
+            params={"id": f"eq.{job_id}"},
+            data=body, timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"patch_audiogram_job {r.status_code}: {r.text[:200]}")
+    except Exception as e:                       # progress is best-effort
+        print(f"patch_audiogram_job failed: {e}")
+
+
 def get_job(job_id):
     """Fetch one shorts_jobs row (service role). Returns the row dict or None."""
     import requests
@@ -662,6 +683,147 @@ def process_video_job(payload: dict):
 
 
 # ----------------------------------------------------------------------
+# action="audiogram" (KH-AUD-001): a standalone LONGER-FORM branded audiogram
+# (square + vertical), picked automatically by a clip_type lens (KH-CTP-001,
+# reused unchanged) + a duration preset — contrast with action="video", whose
+# landscape promo takes a manually chosen start/end window. Audio only: no
+# 1080p video fetch, no face detection/reframe, no Shorts 35s ceiling — reuses
+# detect.py's transcript-only moment picking with a widened band (see
+# detect.audiogram_band_override) so the SAME "which moment matters" engine
+# Shorts uses just runs to a longer target length. Reuses the `studio-video`
+# bucket (same private, human-review-then-approve shape as action="video";
+# no new bucket needed) and drives progress through studio_audiogram_jobs.
+# ----------------------------------------------------------------------
+AUDIOGRAM_DURATION_SEC = {30, 60, 90, 120}
+
+
+def validate_audiogram_payload(payload):
+    """Validate an action="audiogram" payload. Returns None when valid, else a
+    short human-readable reason (the endpoint turns it into a 400). Pure stdlib,
+    mirrors validate_video_payload's shape. `clip_type` is validated separately
+    at the endpoint (it needs detect.TYPE_PROFILES, matching how action="generate"
+    validates it) rather than imported here."""
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    for field in ("job_id", "url", "series"):
+        v = payload.get(field)
+        if not isinstance(v, str) or not v.strip():
+            return f"missing {field}"
+    duration_sec = payload.get("duration_sec", 60)
+    if isinstance(duration_sec, bool) or duration_sec not in AUDIOGRAM_DURATION_SEC:
+        return (f"duration_sec must be one of {sorted(AUDIOGRAM_DURATION_SEC)} "
+                f"(got {duration_sec!r})")
+    transcript = payload.get("transcript")
+    if not isinstance(transcript, dict) or not transcript.get("words"):
+        return "transcript with word timings is required (clip_type selection runs on it)"
+    return None
+
+
+@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+def process_audiogram_job(payload: dict):
+    import subprocess
+    import sys
+    sys.path.insert(0, "/root")
+    os.chdir("/root")
+    _write_cookies()
+
+    job_id = payload.get("job_id")
+
+    def prog(stage, pct, msg=""):
+        patch_audiogram_job(job_id, {"status": "running", "stage": stage,
+                                     "progress": int(pct), "message": msg})
+
+    try:
+        # kh-studio has a stall watchdog on 'queued', so go running immediately.
+        prog("select", 5, "Picking the moment for this audiogram")
+
+        # Defensive re-validation (the endpoint already 400s bad payloads).
+        err = validate_audiogram_payload(payload)
+        if err:
+            raise RuntimeError(f"invalid job payload: {err}")
+
+        url = payload["url"]
+        series = payload.get("series")
+        guest_name = payload.get("guest_name")
+        duration_sec = int(payload.get("duration_sec") or 60)
+        transcript = payload["transcript"]
+
+        from src import detect
+
+        clip_type = str(payload.get("clip_type") or "best")
+        if clip_type not in detect.TYPE_PROFILES:
+            clip_type = "best"                 # unknown type degrades to current behaviour
+        band_override = detect.audiogram_band_override(duration_sec)
+
+        os.makedirs("/tmp/ajob", exist_ok=True)
+        tpath = "/tmp/ajob/transcript.json"
+        import json as _json
+        with open(tpath, "w") as f:
+            _json.dump(transcript, f)
+
+        # Moment picking runs on the TRANSCRIPT alone (no download needed yet) —
+        # the same engine Shorts uses, just with a widened duration band.
+        result = detect.detect(tpath, use_llm=True, top_n=1, clip_type=clip_type,
+                               band_override=band_override,
+                               usage_ctx={"job_id": job_id, "source": "worker-audiogram"})
+        picks = result.get("clips") or []
+        if not picks:
+            raise RuntimeError(
+                f"no {duration_sec}s moment found for clip_type={clip_type!r} in this episode "
+                f"({result.get('n_candidates', 0)} candidates, {result.get('n_passed_gate', 0)} "
+                f"passed the gate) — try a shorter duration or a different clip type")
+        pick = picks[0]
+        start, end = float(pick["start"]), float(pick["end"])
+
+        prog("fetch", 20, "Fetching the audio for the selected moment")
+        audio_path = "/tmp/ajob/window.m4a"
+        file_id = _drive_file_id(url)
+        if file_id:
+            # Google Drive master: download, then extract just the window's audio.
+            prog("fetch", 25, "Downloading the master from Google Drive")
+            import gdown
+            src = f"/tmp/ajob/{file_id}.mp4"
+            gdown.download(id=file_id, output=src, quiet=True)
+            if not os.path.exists(src) or os.path.getsize(src) < 10000:
+                raise RuntimeError("Drive download failed. Is the file shared 'anyone with the link'?")
+            prog("fetch", 35, "Extracting the audio window")
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", src,
+                 "-vn", "-ac", "2", "-c:a", "aac", audio_path],
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"audio extract failed: {r.stderr[-400:]}")
+        else:
+            # YouTube: pull only the window's audio, never the 1080p video.
+            prog("fetch", 30, "Pulling the audio window from YouTube")
+            _fetch_audio_window(url, start, end, audio_path)
+
+        prog("render", 55, "Rendering the audiogram (square + vertical)")
+        from src import audiogram
+        words = audiogram.window_words(transcript.get("words") or [], start, end)
+        title = transcript.get("title")
+        out_base = "/tmp/ajob/audiogram"
+        sq, vt = audiogram.render(
+            audio_path, words, out_base, series=series,
+            caption=pick.get("hook_line"), title=title, guest_name=guest_name,
+            timed_captions=True)
+
+        prog("upload", 90, "Uploading the finished audiograms")
+        sq_url = upload_file(sq, f"{job_id}/audiogram_square.mp4", bucket=VIDEO_BUCKET)
+        vt_url = upload_file(vt, f"{job_id}/audiogram_vertical.mp4", bucket=VIDEO_BUCKET)
+
+        patch_audiogram_job(job_id, {
+            "status": "review", "stage": "done", "progress": 100,
+            "moment_start_sec": int(round(start)), "moment_end_sec": int(round(end)),
+            "output_square_url": sq_url, "output_vertical_url": vt_url,
+            "message": f"{duration_sec}s {clip_type} audiogram ready for review",
+        })
+    except Exception as e:
+        patch_audiogram_job(job_id, {"status": "error", "error": str(e)[:500]})
+        raise
+
+
+# ----------------------------------------------------------------------
 # Per-clip op: the kh-studio "reframe" / "replace" buttons. Re-render ONE clip of a
 # finished job, driving progress through outputs.clips[i].clip_job and NEVER touching
 # the row `status` (it stays 'done' so the results view doesn't collapse).
@@ -980,6 +1142,22 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         if err:
             raise fastapi.HTTPException(status_code=400, detail=err)
         process_video_job.spawn(payload)
+        return {"accepted": True, "job_id": payload["job_id"], "action": _action}
+
+    # Standalone longer-form audiogram, picked by clip_type + duration (KH-AUD-001,
+    # action="audiogram"). clip_type validated here (needs TYPE_PROFILES), the rest
+    # in validate_audiogram_payload — same split action="generate" already uses below.
+    if _action == "audiogram":
+        err = validate_audiogram_payload(payload)
+        if err:
+            raise fastapi.HTTPException(status_code=400, detail=err)
+        clip_type = str(payload.get("clip_type") or "best")
+        import sys as _sys3
+        _sys3.path.insert(0, "/root")
+        from src import detect as _detect_mod3
+        if clip_type not in _detect_mod3.TYPE_PROFILES:
+            raise fastapi.HTTPException(status_code=400, detail=f"unknown clip_type {clip_type!r}")
+        process_audiogram_job.spawn(payload)
         return {"accepted": True, "job_id": payload["job_id"], "action": _action}
 
     # Per-clip ops share this endpoint, distinguished by `action`. An absent `action`
