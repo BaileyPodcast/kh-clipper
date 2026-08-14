@@ -564,8 +564,11 @@ def process_job(job_id: str, url: str, series: str = None,
         patch_job(job_id, {"status": "done", "progress": 100, "stage": "done",
                            "episode_id": result.get("episode_id"), "outputs": outputs,
                            "message": f"{len(outputs['clips'])} clips ready"})
-    except Exception as e:
-        patch_job(job_id, {"status": "error", "error": str(e)[:500]})
+    except (Exception, SystemExit) as e:
+        # SystemExit included: it is a BaseException, so a bare `except Exception`
+        # let it kill the container without ever writing the job's error, leaving
+        # the job "running" until the stall watchdog expired it an hour later.
+        patch_job(job_id, {"status": "error", "error": str(e)[:500] or "worker exited"})
         raise
 
 
