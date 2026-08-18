@@ -90,15 +90,29 @@ def _finish(vertical, words, out_base, banner, highlight_word, safety, clip_inde
     punch-in fallback). `loopable` (from the rerank result) lets both styles
     drop the CTA end cards on a short seamless-loop clip."""
     if caption_style == "kinetic":
-        try:
-            return kinetic.finish(vertical, words, out_base, banner=banner,
-                                  highlight_word=highlight_word, safety=safety,
-                                  loopable=loopable)
-        except Exception as e:
-            print(f"      ~ kinetic render failed ({str(e)[:160]}); falling back to classic")
-    return caption.finish(vertical, words, out_base, banner=banner,
+        # One retry before falling back: the Remotion render can die to a
+        # transient headless-chrome crash in the container, and a whole job
+        # silently shipping classic because of one flake is exactly the
+        # "looks like the old clips" failure the 2026-08-18 live test hit.
+        kin_err = None
+        for attempt in (1, 2):
+            try:
+                outs = kinetic.finish(vertical, words, out_base, banner=banner,
+                                      highlight_word=highlight_word, safety=safety,
+                                      loopable=loopable)
+                return outs, {"caption_engine": "kinetic"}
+            except Exception as e:
+                kin_err = str(e)[-300:]
+                print(f"      ~ kinetic render failed (attempt {attempt}: {str(e)[:160]})")
+        print("      ~ falling back to classic captions")
+        outs = caption.finish(vertical, words, out_base, banner=banner,
+                              highlight_word=highlight_word, safety=safety, clip_index=clip_index,
+                              loopable=loopable)
+        return outs, {"caption_engine": "classic_fallback", "kinetic_error": kin_err}
+    outs = caption.finish(vertical, words, out_base, banner=banner,
                           highlight_word=highlight_word, safety=safety, clip_index=clip_index,
                           loopable=loopable)
+    return outs, {"caption_engine": "classic"}
 
 
 def run(url=None, provider="grok", transcript=None, source=None,
@@ -261,9 +275,14 @@ def run(url=None, provider="grok", transcript=None, source=None,
                     plan = []
                     print(f"      ~ tighten skipped ({str(e)[:120]})")
             # Diarized speech windows: tell reframe WHEN the hero speaks inside this
-            # clip so face-follow locks onto the right person on a two-shot.
+            # clip so face-follow locks onto the right person on a two-shot. On a
+            # tightened clip the windows are remapped into the tightened clock so
+            # face-follow reads the same frames the file actually contains.
             speech = reframe.speech_windows(words_all, c["start"], c["end"],
                                             result.get("guest_speaker"))
+            if plan and speech:
+                speech = {k: [(tighten.remap(t0, plan), tighten.remap(t1, plan))
+                              for (t0, t1) in v] for k, v in speech.items()}
             framing = reframe.reframe(cut_file, vertical,
                                       guest=result.get("guest_speaker"), mode=reframe_mode,
                                       speech=speech)
@@ -274,12 +293,13 @@ def run(url=None, provider="grok", transcript=None, source=None,
             # Kinetic captions (KH-MGX-001): highlight_word + safety (-> CALM preset
             # for anything not "ok") + clip index (alternates the punch-in direction).
             # caption_style picks classic (libass, Wave 1) or kinetic (Remotion, Wave 2).
-            outs = _finish(vertical, words, os.path.join(final_dir, c["clip_id"]),
+            outs, finish_info = _finish(vertical, words, os.path.join(final_dir, c["clip_id"]),
                           banner=banner_by_id.get(c["clip_id"]),
                           highlight_word=c.get("highlight_word"),
                           safety=c.get("safety", "ok"), clip_index=i,
                           caption_style=caption_style,
                           loopable=loopable_by_id.get(c["clip_id"], False))
+            c.update(finish_info)                     # caption_engine (+ kinetic_error)
             # No appended end screen (1.6, decided 2026-08-05) — an appended outro
             # broke the loop rerank.py rewards. The final frame is real story
             # footage; the brand moment lives in the CTA end cards instead.
@@ -436,6 +456,9 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
             print(f"      ~ tighten skipped ({str(e)[:120]})")
     speech = reframe.speech_windows(words_all or [], start, end,
                                     detect.identify_guest(words_all or []))
+    if plan and speech:
+        speech = {k: [(tighten.remap(t0, plan), tighten.remap(t1, plan))
+                      for (t0, t1) in v] for k, v in speech.items()}
     framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode,
                               offset=reframe_offset, speech=speech)
     words = caption.clip_words(words_all or [], start, end)
@@ -445,11 +468,13 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     # safety (-> CALM preset) + index (alternates the punch-in direction). No
     # appended end screen (1.6) — the final frame is real story footage.
     # caption_style picks classic (libass, Wave 1) or kinetic (Remotion, Wave 2).
-    outs = _finish(vertical, words, os.path.join(final_dir, cid), banner=banner,
+    speech_plan = plan
+    outs, finish_info = _finish(vertical, words, os.path.join(final_dir, cid), banner=banner,
                    highlight_word=spec.get("highlight_word"),
                    safety=spec.get("safety", "ok"), clip_index=index,
                    caption_style=caption_style,
                    loopable=bool(spec.get("loopable", False)))
+    spec.update(finish_info)                     # caption_engine (+ kinetic_error)
     if make_audiogram:
         try:
             audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series,

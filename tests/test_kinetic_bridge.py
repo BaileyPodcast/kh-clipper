@@ -149,9 +149,10 @@ def test_finish_dispatches_to_classic_by_default(monkeypatch):
                         lambda *a, **k: calls.append(("classic", k)) or ["a.mp4"])
     monkeypatch.setattr(clipper.kinetic, "finish",
                         lambda *a, **k: calls.append(("kinetic", k)) or ["b.mp4"])
-    out = clipper._finish("v.mp4", [], "out", banner=None, highlight_word="x",
+    out, info = clipper._finish("v.mp4", [], "out", banner=None, highlight_word="x",
                           safety="ok", clip_index=0, caption_style="classic")
     assert out == ["a.mp4"]
+    assert info == {"caption_engine": "classic"}
     assert [c[0] for c in calls] == ["classic"]
 
 
@@ -160,9 +161,10 @@ def test_finish_dispatches_to_kinetic_when_requested():
     orig = clipper.kinetic.finish
     clipper.kinetic.finish = lambda *a, **k: calls.append("kinetic") or ["k.mp4"]
     try:
-        out = clipper._finish("v.mp4", [], "out", banner=None, highlight_word=None,
+        out, info = clipper._finish("v.mp4", [], "out", banner=None, highlight_word=None,
                               safety="ok", clip_index=0, caption_style="kinetic")
         assert out == ["k.mp4"]
+        assert info == {"caption_engine": "kinetic"}
         assert calls == ["kinetic"]
     finally:
         clipper.kinetic.finish = orig
@@ -175,10 +177,29 @@ def test_finish_falls_back_to_classic_when_kinetic_fails(monkeypatch):
     monkeypatch.setattr(clipper.kinetic, "finish", boom)
     monkeypatch.setattr(clipper.caption, "finish",
                         lambda *a, **k: calls.append("classic") or ["fallback.mp4"])
-    out = clipper._finish("v.mp4", [], "out", banner=None, highlight_word=None,
+    out, info = clipper._finish("v.mp4", [], "out", banner=None, highlight_word=None,
                           safety="ok", clip_index=0, caption_style="kinetic")
     assert out == ["fallback.mp4"]     # the clip is never lost
     assert calls == ["classic"]
+    # The fallback is recorded, never silent (2026-08-18 live test), and the
+    # kinetic render is retried once before giving up.
+    assert info["caption_engine"] == "classic_fallback"
+    assert "no node_modules" in info["kinetic_error"]
+
+
+def test_finish_retries_kinetic_once_then_succeeds(monkeypatch):
+    attempts = []
+    def flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("chrome crashed")
+        return ["k.mp4"]
+    monkeypatch.setattr(clipper.kinetic, "finish", flaky)
+    out, info = clipper._finish("v.mp4", [], "out", banner=None, highlight_word=None,
+                                safety="ok", clip_index=0, caption_style="kinetic")
+    assert out == ["k.mp4"]
+    assert info == {"caption_engine": "kinetic"}
+    assert len(attempts) == 2
 
 
 def test_finish_passes_clip_index_through_to_classic_only(monkeypatch):
