@@ -33,6 +33,11 @@ import os
 import re
 import subprocess
 
+try:
+    from . import loudness                # imported as a package
+except ImportError:
+    import loudness                       # run as a script
+
 SQUARE = (1080, 1080)
 VERTICAL = (1080, 1920)
 LANDSCAPE = (1920, 1080)
@@ -556,6 +561,7 @@ def _render(clip_in, out_path, frame, pal, here, *, caption, title, guest,
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
            "-r", str(FPS), "-i", "-", "-i", clip_in,
            "-map", "0:v", "-map", "1:a?", "-c:v", "libx264", "-preset", "medium",
+           "-crf", "18",
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-r", str(FPS), "-t", f"{dur:.3f}",
            "-movflags", "+faststart", out_path]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -644,10 +650,12 @@ def render(clip_in, words, out_base, series=None, here=None,
     _render(clip_in, sq, SQUARE, pal, here, caption=cap, title=title or "",
             guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps,
             timed_lines=timed)
+    loudness.normalize(sq)              # -14 LUFS for YouTube; non-fatal on failure
     print(f"  audiogram {os.path.basename(sq)}")
     _render(clip_in, vt, VERTICAL, pal, here, caption=cap, title=title or "",
             guest=guest_name, eyebrow=eyebrow, ep_label=ep_label, bars=bars, amps=amps,
             timed_lines=timed)
+    loudness.normalize(vt)
     print(f"  audiogram {os.path.basename(vt)}")
     return [sq, vt]
 
@@ -690,6 +698,7 @@ def render_landscape(clip_in, out_path, *, series=None, brand=None, words=None,
     _render(clip_in, out_path, LANDSCAPE, pal, here, caption=cap,
             title=footer_title, guest=guest_name, eyebrow=eyebrow,
             ep_label=ep_label, bars=bars, amps=amps, timed_lines=timed)
+    loudness.normalize(out_path)        # -14 LUFS for YouTube; non-fatal on failure
     print(f"  audiogram {os.path.basename(out_path)}")
     return out_path, notes
 

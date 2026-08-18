@@ -125,11 +125,17 @@ ANIMATION = {
         "raised_margin_v_px": 620,      # used when the face sits unusually low
         "low_face_threshold": 0.62,     # face bottom (normalised) >= this = "low"
     },
-    # Same face-aware idea applied to the hook banner (upper third), checked
-    # against the face TOP instead of the bottom.
+    # Same face-aware idea applied to the hook banner, checked against the
+    # face TOP instead of the bottom. The banner rests roughly a third of the
+    # way down the 1920 frame (not hugged to the top): with the Banner style's
+    # top-centre anchor, a 560px top margin puts the single-line banner box
+    # (font 80 + pill padding, ~110px tall) centred near y=615, close to
+    # 1920/3 = 640. The face-top drop rule is unchanged and still wins: a high
+    # face drops the banner further down by the same 160px delta the old
+    # 360/520 pair used, keeping it decisively clear rather than on the face.
     "banner_bands": {
-        "default_margin_v_px": 360,     # unchanged default (matches Banner style)
-        "mid_margin_v_px": 520,         # dropped position when the crop puts the face high
+        "default_margin_v_px": 560,     # resting position, about a third down the frame
+        "mid_margin_v_px": 720,         # dropped position when the crop puts the face high
         "high_face_threshold": 0.20,    # face top (normalised) <= this = "high"
     },
 

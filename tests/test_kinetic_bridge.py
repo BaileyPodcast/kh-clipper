@@ -124,6 +124,9 @@ def test_finish_threads_quote_card_intro_flag_to_the_node_cli(monkeypatch, tmp_p
         return FakeResult()
 
     monkeypatch.setattr(kinetic.subprocess, "run", fake_run)
+    # The loudnorm post-step is its own ffmpeg call, stub it so `captured`
+    # keeps the node render command this test is actually asserting on.
+    monkeypatch.setattr(kinetic.loudness, "normalize", lambda p: p)
 
     out_base = str(tmp_path / "clip")
     kinetic.finish("clip.mp4", [], out_base, banner="A hard chapter",
@@ -184,7 +187,7 @@ def test_finish_passes_clip_index_through_to_classic_only(monkeypatch):
     seen = {}
 
     def fake_kinetic_finish(clip_in, words, out_base, banner=None, highlight_word=None,
-                            safety="ok"):
+                            safety="ok", loopable=False):
         seen["kinetic_kwargs_ok"] = True
         return ["k.mp4"]
     monkeypatch.setattr(clipper.kinetic, "finish", fake_kinetic_finish)

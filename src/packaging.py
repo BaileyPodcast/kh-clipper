@@ -1,9 +1,11 @@
 """
-KH Shorts packaging standard (locked May 2026 v5). The worker's mirror of the
+KH Shorts packaging standard (locked May 2026 v5; hashtags + title re-locked
+2026-08 to the 3-hashtag / hook-only-title contract). The worker's mirror of the
 app's single source of truth (kh-studio lib/studio/shorts-packaging.ts). The two
-sides MUST agree: the blurbs, the About-KH block, the 15-hashtag locked order, the
-3-group tags field, the pinned-comment format and the cadence are byte-identical
-here and in the app, and the shared spec lives in SHORTS-WORKER-CONTRACT.md.
+sides MUST agree: the blurbs, the About-KH block, the 3-hashtag locked build, the
+3-group tags field, the hook-only title, the pinned-comment format and the
+cadence are byte-identical here and in the app, and the shared spec lives in
+SHORTS-WORKER-CONTRACT.md.
 
 This module owns the deterministic scaffolding only. The Grok call in metadata.py
 fills the creative slots (the hook, the SEO line, the context, the topic picks,
@@ -108,22 +110,22 @@ TOPIC_TAGS = {
     "dyslexia": "#dyslexia",
 }
 
-BOOST_OPEN = ["#Shorts", "#ytshorts"]              # positions 1-2
-BOOST_REMAINDER = ["#viralshorts", "#shortsvideo", "#shortsfeed"]  # 4-6
-BRAND_PODCAST_TAG = "#KintsugiHeroesPodcast"       # position 9
-# Audience tags (skill 13-15). "#inspiringstories" is excluded (banned word).
-AUDIENCE_TAGS = [
-    "#realstories", "#livedexperience", "#australianpodcast",
-    "#truestories", "#storytelling", "#podcastclips", "#podcast",
-]
+# The locked 3-hashtag build (mirrors the app): core ["#Shorts", <series tag>,
+# "#KintsugiHeroes"], deduped case-insensitively keeping the first occurrence,
+# then backfilled in order from HASHTAG_BACKFILL until exactly 3.
+HASHTAG_COUNT = 3
+HASHTAG_BACKFILL = ["#KintsugiHeroesPodcast", "#ytshorts"]
 
 BROAD_TAGS_LOCKED = ["shorts", "ytshorts", "viral shorts", "shorts viral"]
 BROAD_TAGS_FILL = [
     "podcast clips", "podcast shorts", "real stories", "true stories", "motivational stories",
 ]
 
-TITLE_SUFFIX = " | Kintsugi Heroes Shorts"
-TITLE_MAX = 100
+# Title contract (mirrors the app): the hook ONLY, no brand suffix, no hero
+# name. TITLE_TARGET is the generator's aim; TITLE_MAX is the hard cap, trimmed
+# at a word boundary with no ellipsis.
+TITLE_TARGET = 40
+TITLE_MAX = 60
 TAGS_LIMIT = 500
 
 FULL_EPISODE_TODO = "→ PASTE FULL EPISODE LINK"
@@ -164,23 +166,25 @@ def _dedupe_ci(tags):
     return out
 
 
-def compose_hashtags(slug, primary_topic, secondary_topics=None, audience_tags=None):
-    """The locked 15-hashtag block in the locked order (matches the app)."""
+def compose_hashtags(slug, primary_topic=None, secondary_topics=None, audience_tags=None):
+    """The locked 3-hashtag block (matches the app): ["#Shorts", <series tag>,
+    "#KintsugiHeroes"], deduped case-insensitively keeping the first occurrence,
+    backfilled in order from HASHTAG_BACKFILL until exactly 3. On the main feed
+    (series tag #KintsugiHeroes) this yields
+    #Shorts #KintsugiHeroes #KintsugiHeroesPodcast.
+
+    `primary_topic`/`secondary_topics`/`audience_tags` are accepted for caller
+    compatibility (the old 15-tag build used them) and deliberately ignored:
+    topics live in the tags FIELD now, never the hashtag block."""
     meta = series_meta(slug)
-    primary = canonical_topic_tag(primary_topic) or "#realstories"
-    secondary = [t for t in (canonical_topic_tag(x) for x in (secondary_topics or [])) if t]
-    audience = [t for t in (_clean_hashtag(x) for x in (audience_tags or [])) if t]
-    ordered = (
-        BOOST_OPEN
-        + [primary]
-        + BOOST_REMAINDER
-        + ["#KintsugiHeroes", meta["tag"], BRAND_PODCAST_TAG]
-        + secondary
-        + audience
-        + AUDIENCE_TAGS  # backfill to 15
-    )
-    cleaned = [t for t in (_clean_hashtag(x) for x in ordered) if t]
-    return _dedupe_ci(cleaned)[:15]
+    core = ["#Shorts", meta["tag"], "#KintsugiHeroes"]
+    cleaned = [t for t in (_clean_hashtag(x) for x in core) if t]
+    tags = _dedupe_ci(cleaned)
+    for fill in HASHTAG_BACKFILL:
+        if len(tags) >= HASHTAG_COUNT:
+            break
+        tags = _dedupe_ci(tags + [fill])
+    return tags[:HASHTAG_COUNT]
 
 
 def _tag_cost(tag):
@@ -262,17 +266,17 @@ def compose_description(slug, hook_seo_line, context, hashtags, full_episode_url
 
 
 def compose_title(hook, hero_name=None):
-    """[Hook] | [Hero] | Kintsugi Heroes Shorts, capped at 100 chars."""
+    """The hook ONLY (matches the app): no " | Kintsugi Heroes Shorts" suffix,
+    no hero name. Target TITLE_TARGET (40) chars, hard cap TITLE_MAX (60); over
+    the cap the hook is trimmed at a word boundary, no ellipsis. `hero_name` is
+    accepted for caller compatibility and deliberately ignored."""
     hook = " ".join(str(hook or "").split()).strip().rstrip("|").strip()
-    hero = (hero_name or "").strip()
-    with_hero = f"{hook} | {hero}{TITLE_SUFFIX}" if hero else f"{hook}{TITLE_SUFFIX}"
-    if len(with_hero) <= TITLE_MAX:
-        return with_hero
-    no_hero = f"{hook}{TITLE_SUFFIX}"
-    if len(no_hero) <= TITLE_MAX:
-        return no_hero
-    room = max(0, TITLE_MAX - len(TITLE_SUFFIX))
-    return f"{hook[:room].strip()}{TITLE_SUFFIX}"
+    if len(hook) <= TITLE_MAX:
+        return hook
+    cut = hook[:TITLE_MAX + 1]
+    at_space = cut.rfind(" ")
+    trimmed = cut[:at_space] if at_space > 0 else hook[:TITLE_MAX]
+    return trimmed.strip()
 
 
 def compose_pinned(question, full_episode_url=None, prefix=None):

@@ -1,9 +1,10 @@
 """
 Parity tests for the worker's Shorts packaging (src/packaging.py) against the
-locked v5 standard. These pin the SAME deterministic scaffolding the app pins in
-kh-studio tests/shorts-packaging.test.ts, so the two repos cannot drift: the
-blurbs, the About-KH block, the 15-hashtag locked order and the tags rules must
-match on both sides.
+locked v5 standard (hashtags + title re-locked 2026-08). These pin the SAME
+deterministic scaffolding the app pins in kh-studio
+tests/shorts-packaging.test.ts, so the two repos cannot drift: the blurbs, the
+About-KH block, the 3-hashtag locked build, the hook-only title and the tags
+rules must match on both sides.
 
     python -m pytest tests/test_packaging.py
     python tests/test_packaging.py        # also runs standalone (no pytest)
@@ -29,12 +30,9 @@ ABOUT_KH_EXPECTED = (
     "cracks are what make us stronger."
 )
 
-HASHTAGS_GOLDEN_THREADS_EXPECTED = [
-    "#Shorts", "#ytshorts", "#disability", "#viralshorts", "#shortsvideo",
-    "#shortsfeed", "#KintsugiHeroes", "#GoldenThreads", "#KintsugiHeroesPodcast",
-    "#resilience", "#healing", "#vulnerability", "#realstories", "#livedexperience",
-    "#australianpodcast",
-]
+# Golden values (locked cross-repo contract): EXACTLY 3 hashtags.
+HASHTAGS_GOLDEN_THREADS_EXPECTED = ["#Shorts", "#GoldenThreads", "#KintsugiHeroes"]
+HASHTAGS_MAIN_FEED_EXPECTED = ["#Shorts", "#KintsugiHeroes", "#KintsugiHeroesPodcast"]
 
 
 def test_series_map_is_the_8_worker_slugs():
@@ -57,18 +55,28 @@ def test_blurbs_are_house_voice_clean():
         assert meta["tag"].startswith("#")
 
 
-def test_hashtags_locked_order_matches_the_app():
+def test_hashtags_locked_build_matches_the_app():
+    # Topic args are accepted for compatibility but never change the block.
     tags = packaging.compose_hashtags(
         "golden-threads", "disability",
         secondary_topics=["resilience", "healing", "vulnerability"])
     assert tags == HASHTAGS_GOLDEN_THREADS_EXPECTED
 
 
-def test_hashtags_reach_15_and_dedupe_on_main_feed():
+def test_hashtags_main_feed_dedupes_and_backfills_to_exactly_3():
     tags = packaging.compose_hashtags("kintsugi-heroes", "grief")
-    assert len(tags) == 15
-    assert len(set(t.lower() for t in tags)) == 15
+    assert tags == HASHTAGS_MAIN_FEED_EXPECTED
+    assert len(tags) == 3
+    assert len(set(t.lower() for t in tags)) == 3
     assert [t.lower() for t in tags].count("#kintsugiheroes") == 1
+
+
+def test_hashtags_are_exactly_3_for_every_series():
+    for slug in packaging.SERIES:
+        tags = packaging.compose_hashtags(slug)
+        assert len(tags) == 3, slug
+        assert tags[0] == "#Shorts", slug
+        assert len(set(t.lower() for t in tags)) == 3, slug
 
 
 def test_topic_casing_normalised():
@@ -76,16 +84,34 @@ def test_topic_casing_normalised():
     assert packaging.canonical_topic_tag("#adhd") == "#ADHD"
 
 
-def test_title_convention_and_cap():
-    assert packaging.compose_title("Three years sober", "Sam Lee") == \
-        "Three years sober | Sam Lee | Kintsugi Heroes Shorts"
+def test_title_is_hook_only_no_suffix_no_hero():
+    # The hook ONLY: no brand suffix, and a hero name is never appended.
+    assert packaging.compose_title("Three years sober", "Sam Lee") == "Three years sober"
     assert packaging.compose_title("The moment everything changed") == \
-        "The moment everything changed | Kintsugi Heroes Shorts"
+        "The moment everything changed"
+
+
+def test_title_over_60_trims_at_a_word_boundary_no_ellipsis():
     long_hook = "A very long honest hook line that eats most of the character budget here"
     t = packaging.compose_title(long_hook, "Alexandra Featherstone-Montgomery")
-    assert len(t) <= 100
-    assert t.endswith(" | Kintsugi Heroes Shorts")
-    assert "Featherstone" not in t
+    # Golden trimmed value: "character" ends exactly on the 60-char cap, so the
+    # trim keeps it whole and drops the words after it.
+    assert t == "A very long honest hook line that eats most of the character"
+    assert len(t) <= packaging.TITLE_MAX
+    assert not t.endswith("...") and "…" not in t
+    assert "Featherstone" not in t and "|" not in t
+
+
+def test_title_at_exactly_60_is_untouched():
+    hook = "x" * 60
+    assert packaging.compose_title(hook) == hook
+
+
+def test_title_trim_backs_up_off_a_mid_word_cut():
+    # "characters" would need 61 chars to survive whole, so the trim drops it.
+    hook = "A very long honest hook line that eats most of the characters budget"
+    assert packaging.compose_title(hook) == \
+        "A very long honest hook line that eats most of the"
 
 
 def test_description_is_7_part_and_clean():

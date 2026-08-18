@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import time
 
-from src import export_brand
+from src import cta, export_brand, loudness
 
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RENDER_DIR = os.path.join(_HERE, "render")
@@ -62,7 +62,7 @@ def _fps(path) -> float:
 
 def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="ok",
            faceband=None, frame=(1080, 1920), variants=("shorts", "universal"),
-           quote_card_intro=False, end_screen_cta=True):
+           quote_card_intro=False, end_screen_cta=True, loopable=False):
     """Render the KH Kinetic template. Mirrors src.caption.finish()'s call
     shape and return value (a list of written file paths) so clipper.py can
     branch between the two with no other change downstream.
@@ -76,7 +76,9 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
     "shorts" variant, branded text/handle for "universal". Default ON so
     `caption_style="kinetic"` stays at parity with classic's own always-on
     CTA (src/cta.py) rather than being a downgrade; pass False to opt a
-    single render out.
+    single render out. `loopable` (from the rerank result) suppresses the end
+    screen on a short seamless-loop clip, same rule as src/cta.py's classic
+    end cards (cta.suppress_end_cards) so the loop seam stays a clean cut.
 
     With `end_screen_cta` on, "shorts" and "universal" are genuinely
     different renders now (arrows vs branded text/handle) — each requested
@@ -96,6 +98,12 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
     brand_path = export_brand.export_brand(os.path.join(RENDER_DIR, "brand.json"))
     dur = _duration(clip_in)
     fps = _fps(clip_in)
+
+    # A short seamless-loop clip ships with no end cards at all so the loop
+    # seam stays a clean hard cut, the SAME rule (and threshold) the classic
+    # libass CTA applies in src/cta.py, never a second copy of the maths.
+    if end_screen_cta and cta.suppress_end_cards(dur, loopable):
+        end_screen_cta = False
 
     with tempfile.TemporaryDirectory() as tmp:
         words_path = os.path.join(tmp, "words.json")
@@ -157,6 +165,7 @@ def finish(clip_in, words, out_base, banner=None, highlight_word=None, safety="o
             os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
             with open(rendered_paths[src_variant], "rb") as src_f, open(out, "wb") as dst_f:
                 dst_f.write(src_f.read())
+            loudness.normalize(out)     # -14 LUFS for YouTube; non-fatal on failure
             outs.append(out)
         # v1/v2 render-cost note (Wave 2 acceptance criterion) — wall-clock
         # render time for the real render(s) only, never per copied variant.

@@ -221,6 +221,34 @@ const QuoteCardIntro: React.FC<{ text: string; brand: Brand; preset: PresetConfi
   );
 };
 
+/** KH-MGX-001 1.4 parity: the same gentle punch-in classic (libass) applies via
+ * its zoompan filter: scale runs linearly from punchIn.startScale (1.00) to
+ * punchIn.endScale (1.04) across the clip's own duration. No spring, no ease:
+ * a linear ramp, matching classic's constant-step zoompan exactly. Reads every
+ * value from brand.json (animation.punchIn, exported from src/brand.py), and
+ * is DISABLED whenever the CALM preset applies (safety != "ok" ->
+ * preset.punchIn false) or the global punchIn.enabled kill-switch is off,
+ * the same two gates classic's caption.finish() checks. */
+const PunchInVideo: React.FC<{
+  videoFileName: string;
+  brand: Brand;
+  preset: PresetConfig;
+  durationInFrames: number;
+}> = ({ videoFileName, brand, preset, durationInFrames }) => {
+  const frame = useCurrentFrame(); // local to mainContent, 0 at the footage's own start
+  const p = brand.animation.punchIn;
+  const enabled = p.enabled && preset.punchIn && p.endScale > p.startScale;
+  const progress = durationInFrames > 1 ? Math.min(1, frame / durationInFrames) : 0;
+  const scale = enabled ? p.startScale + (p.endScale - p.startScale) * progress : 1;
+  return (
+    <AbsoluteFill
+      style={enabled ? { transform: `scale(${scale})`, transformOrigin: "center center" } : undefined}
+    >
+      <OffthreadVideo src={staticFile(videoFileName)} />
+    </AbsoluteFill>
+  );
+};
+
 const Banner: React.FC<{ text: string | null; brand: Brand; faceband: FaceBand; durationInFrames: number }> = ({
   text,
   brand,
@@ -628,7 +656,12 @@ export const KHKinetic: React.FC<KhKineticProps> = (props) => {
   // intro is on, just optionally shifted later by `introFrames`.
   const mainContent = (
     <>
-      <OffthreadVideo src={staticFile(videoFileName)} />
+      <PunchInVideo
+        videoFileName={videoFileName}
+        brand={brand}
+        preset={preset}
+        durationInFrames={durationInFrames}
+      />
       <Banner text={banner} brand={brand} faceband={faceband} durationInFrames={durationInFrames} />
       {pages.map((page, i) => {
         const from = msToFrames(page.startMs, fps);
