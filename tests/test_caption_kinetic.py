@@ -219,6 +219,62 @@ def test_finish_alternates_punch_in_direction_by_clip_index(monkeypatch):
     assert calls == ["left", "right", "left", "right"]
 
 
+# ---------------------------------------------------------------------------
+# Hook banner timing: frame 1 start, 3-second minimum hold
+# ---------------------------------------------------------------------------
+
+def test_banner_starts_on_frame_1_and_keeps_the_fade():
+    events = caption.banner_events("He stopped hiding", 30.0)
+    assert len(events) == 1
+    assert ",0:00:00.00," in events[0]                # t0 = 0.0, frame 1
+    assert "\\fad(350,350)" in events[0]
+
+
+def test_banner_holds_at_least_3_seconds_on_a_short_clip():
+    # duration 4s -> 4 * 0.55 = 2.2, clamped up to the 3.0 floor
+    events = caption.banner_events("He stopped hiding", 4.0)
+    assert ",0:00:03.00," in events[0]
+
+
+def test_banner_caps_at_5_seconds_on_a_long_clip():
+    events = caption.banner_events("He stopped hiding", 30.0)
+    assert ",0:00:05.00," in events[0]
+
+
+def test_banner_window_scales_between_floor_and_cap():
+    # duration 7s -> 7 * 0.55 = 3.85, inside [3, 5]
+    events = caption.banner_events("He stopped hiding", 7.0)
+    assert ",0:00:03.85," in events[0]
+
+
+# ---------------------------------------------------------------------------
+# Final export encode pinned (never ffmpeg's default CRF 23)
+# ---------------------------------------------------------------------------
+
+def test_final_encode_is_pinned_crf_18_faststart():
+    e = caption.FINAL_ENCODE
+    assert e[e.index("-c:v") + 1] == "libx264"
+    assert e[e.index("-preset") + 1] == "medium"
+    assert e[e.index("-crf") + 1] == "18"
+    assert e[e.index("-pix_fmt") + 1] == "yuv420p"
+    assert "+faststart" in e[e.index("-movflags") + 1]
+
+
+# ---------------------------------------------------------------------------
+# Banner placement: rests about a third down the frame, drop rule still wins
+# ---------------------------------------------------------------------------
+
+def test_banner_default_band_sits_near_the_upper_third():
+    default = ANIM["banner_bands"]["default_margin_v_px"]
+    # Banner box (~110px for font 80 + pill padding) centred near 1920/3 = 640.
+    assert abs((default + 55) - 1920 / 3) < 60
+
+
+def test_banner_drop_band_stays_below_the_default():
+    b = ANIM["banner_bands"]
+    assert b["mid_margin_v_px"] > b["default_margin_v_px"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0

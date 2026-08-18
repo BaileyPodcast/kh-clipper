@@ -9,8 +9,8 @@ packaging.py (the worker's mirror of the app's shorts-packaging.ts):
   title          the short render-facing hook (the audiogram footer + on-screen
                  banner read it; the app composes the 100-char YouTube upload title)
   description    the locked 7-part v5 block (hook+SEO line, context, links, About-KH,
-                 series blurb, subscribe, 15 hashtags)
-  hashtags       exactly the locked 15, in order
+                 series blurb, subscribe, the 3 locked hashtags)
+  hashtags       exactly the locked 3 (#Shorts, series tag, brand backfill)
   tags           the 3-group tags field (Post Specific, Niche, Broad), flat
   pinned_comment full-episode link + one open engagement question (crisis line on
                  sensitive clips)
@@ -84,8 +84,8 @@ clickbait scoring; KH has its own honest voice.
 
 {guardrails.SYSTEM_PROMPT_GUARDRAILS}
 
-The fixed scaffolding (About Kintsugi Heroes, the series blurb, the 15 hashtags in \
-their locked order, the tags field, the links and subscribe line) is assembled by the \
+The fixed scaffolding (About Kintsugi Heroes, the series blurb, the locked hashtags, \
+the tags field, the links and subscribe line) is assembled by the \
 app, not by you. FOR EACH CLIP, produce ONLY these creative slots:
 - title: a short, honest-curiosity title in KH's voice (the hook only, no brand \
 suffix, a few words). A real curiosity gap, never clickbait, never a banned hype word. \
@@ -106,7 +106,16 @@ Lead with the person and the turning point, no spoilers of the full episode.
 - pinned_question: one open-ended question tied to THIS clip's theme that invites a \
 safe reply. NEVER ask anyone to disclose trauma in the comments.
 - banner_hook: a short on-screen banner headline using curiosity-gap framing \
-(e.g. "He can't feel his legs"). A few words, punchy, dignified.
+(e.g. "He can't feel his legs"). A few words, punchy, dignified. HARD RULES for \
+banner_hook, every one of them:
+  1. The banner must ALIGN with the clip's FIRST SPOKEN WORDS: same subject and \
+same stakes as what the viewer hears in the opening seconds. Never a different \
+angle on the clip, and never a verbatim copy of the captions.
+  2. At most 2 lines and about 7 words total.
+  3. No punctuation at all except quotation marks or parentheses.
+  4. No compound or transition words (and, or, but, that, therefore).
+  5. Prefer a concrete specific (a number, a named detail) over a vague phrase.
+  6. Plain words only, interpretable one way and one way only.
 
 You return STRICT JSON only."""
 
@@ -179,9 +188,25 @@ def _extract_packs(text):
     raise ValueError("Incomplete JSON in the model response.")
 
 
+def hook_phrase_block(hook_phrases):
+    """The optional data-backed phrase-directions block for the user prompt, or
+    "" when absent. `hook_phrases` are proven phrases mined from KH's own
+    winning Shorts; the model remixes their psychology, never the words. Pure,
+    so it is unit-testable offline."""
+    phrases = [str(p).strip() for p in (hook_phrases or []) if str(p or "").strip()]
+    if not phrases:
+        return ""
+    lines = "\n".join(f'- "{p}"' for p in phrases)
+    return (
+        "Data-backed phrase directions, mined from KH's own winning Shorts. "
+        "Remix the psychology of these (their shape, their kind of hook), never "
+        "copy a phrase verbatim:\n" + lines + "\n"
+    )
+
+
 def generate(clips, episode_title, episode_url, handle=None,
              model=ANTHROPIC_MODEL, api_key=None, guest_name=None, series=None,
-             usage_ctx=None, clip_type="best"):
+             usage_ctx=None, clip_type="best", hook_phrases=None):
     """Attach a `metadata` dict to each clip (in place) and return the clips.
     Raises on any failure so the caller can fall back to no-metadata.
 
@@ -189,7 +214,9 @@ def generate(clips, episode_title, episode_url, handle=None,
     the title/context/pinned instead of "our guest". `series` is the worker series
     slug, used to build the series-correct hashtags, tags and blurb. `clip_type`
     (KH-CTP-001) adds a one-line tone hint to the creative slots; "best" adds
-    nothing and the locked packaging scaffolding is never touched either way."""
+    nothing and the locked packaging scaffolding is never touched either way.
+    `hook_phrases` (optional) are proven phrases mined from KH's own winning
+    Shorts, fed to the prompt as phrase DIRECTIONS to remix, never to copy."""
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not set, cannot generate the metadata pack.")
@@ -209,6 +236,7 @@ def generate(clips, episode_title, episode_url, handle=None,
         f'Episode: "{episode_title}"\n'
         f"{guest_line}"
         f"{tone_hint_line(clip_type)}"
+        f"{hook_phrase_block(hook_phrases)}"
         f"Here are the {len(clips)} clips, each with an [index]:\n\n{blocks}\n\n"
         f'Return JSON exactly like: {{"packs": [{{"index": <int>, '
         f'"title": "<short hook title>", "hook_seo_line": "<under 150 chars>", '

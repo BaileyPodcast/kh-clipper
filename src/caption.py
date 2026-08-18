@@ -30,7 +30,7 @@ import json
 import os
 import re
 import subprocess
-from src import brand, cta
+from src import brand, cta, loudness
 
 CAP = brand.CAPTION
 ANIM = brand.ANIMATION
@@ -168,20 +168,21 @@ def caption_events(words, highlight_word=None, preset=None):
 
 
 def banner_events(banner, duration):
-    """The on-screen hook banner: the curiosity-gap headline shown big in the upper
-    third for the opening seconds (the scroll-stopper), then faded out so it doesn't
-    fight the captions. One ASS event."""
+    """The on-screen hook banner: the curiosity-gap headline shown big for the
+    opening seconds (the scroll-stopper), then faded out so it doesn't fight the
+    captions. One ASS event. Starts on FRAME 1 (t=0.0, the hook must exist the
+    instant the feed shows the clip) and holds at least 3 seconds."""
     if not banner:
         return []
-    t0 = 0.2
-    t1 = min(5.0, max(2.5, duration * 0.55))      # hold through the hook window
+    t0 = 0.0
+    t1 = min(5.0, max(3.0, duration * 0.55))      # hold through the hook window
     fade = "\\fad(350,350)"
     text = banner.strip().rstrip(".")             # punchy, no trailing full stop
     return [f"Dialogue: 0,{_t(t0)},{_t(t1)},Banner,,0,0,,{{{fade}}}{text}"]
 
 
 def build_ass(words, duration, variant, path, frame=(1080, 1920), banner=None,
-              highlight_word=None, preset=None, faceband=None):
+              highlight_word=None, preset=None, faceband=None, loopable=False):
     W, H = frame
     preset = preset or ANIM["presets"]["standard"]
     cream, olive = CAP["base_colour"], CAP["outline_colour"]
@@ -217,9 +218,12 @@ Style: CTAarrow,{brand.CTA['font']},{brand.CTA['font_size']},{gold},{olive},&H00
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, Effect, Text
 """
     # When the banner owns the opening, drop the early subscribe nudge (declutter).
+    # `loopable` lets cta.py skip the end cards on a short seamless-loop clip so
+    # the loop seam stays a clean hard cut.
     events = (banner_events(banner, duration)
               + caption_events(words, highlight_word=highlight_word, preset=preset)
-              + cta.build_cta_events(duration, variant, frame, suppress_soft=bool(banner)))
+              + cta.build_cta_events(duration, variant, frame, suppress_soft=bool(banner),
+                                     loopable=loopable))
     with open(path, "w") as f:
         f.write(header + "\n".join(events) + "\n")
     return path
@@ -266,15 +270,24 @@ def _punch_in_filter(duration, frame, fps, direction):
     return f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d=1:s={w}x{h}:fps={fps:.3f}"
 
 
+# The SHIPPING encode: pinned so the final export never falls to ffmpeg's
+# default CRF 23 while every earlier stage encodes CRF 18. One list, used by
+# both the normal and the punch-in-retry command.
+FINAL_ENCODE = ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+
+
 def finish(clip_in, words, out_base, frame=(1080, 1920), here=None,
            variants=("shorts", "universal"), banner=None,
-           highlight_word=None, safety="ok", clip_index=0):
+           highlight_word=None, safety="ok", clip_index=0, loopable=False):
     """Burn kinetic captions + hook banner + CTA + logo (+ punch-in). Writes
     <out_base>_<variant>.mp4 per variant.
 
     `safety` selects the animation preset (CALM for anything but "ok" —
     KH-TIC-001). `highlight_word` is detect.py's emphasis token. `clip_index`
-    alternates the punch-in direction across a run's clips."""
+    alternates the punch-in direction across a run's clips. `loopable` (from
+    the rerank result) lets cta.py drop the end cards on a short seamless-loop
+    clip so the loop seam stays a clean hard cut."""
     here = here or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     fonts_dir = os.path.join(here, "assets", "fonts")
     logo = os.path.join(here, brand.LOGO["file_on_video"])
@@ -300,7 +313,7 @@ def finish(clip_in, words, out_base, frame=(1080, 1920), here=None,
     for variant in variants:
         ass = build_ass(words, dur, variant, f"{out_base}.{variant}.ass", frame,
                          banner=banner, highlight_word=highlight_word, preset=preset,
-                         faceband=faceband)
+                         faceband=faceband, loopable=loopable)
         ass_f = ass.replace("\\", "/").replace(":", "\\:")
         fonts_f = fonts_dir.replace("\\", "/").replace(":", "\\:")
         out = f"{out_base}_{variant}.mp4"
@@ -315,7 +328,7 @@ def finish(clip_in, words, out_base, frame=(1080, 1920), here=None,
             cmd += ["-i", logo, "-filter_complex", filt, "-map", "[out]"]
         else:                                  # logo missing: captions+CTA (+ punch-in) only
             cmd += ["-vf", video_vf, "-map", "0:v"]
-        cmd += ["-map", "0:a?", "-c:a", "aac", "-pix_fmt", "yuv420p", out]
+        cmd += ["-map", "0:a?", "-c:a", "aac"] + FINAL_ENCODE + [out]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0 and punch:
             # A bad punch-in expression must never cost us the clip — retry flat.
@@ -328,10 +341,11 @@ def finish(clip_in, words, out_base, frame=(1080, 1920), here=None,
                 cmd += ["-i", logo, "-filter_complex", flat_filt, "-map", "[out]"]
             else:
                 cmd += ["-vf", f"subtitles='{ass_f}':fontsdir='{fonts_f}'", "-map", "0:v"]
-            cmd += ["-map", "0:a?", "-c:a", "aac", "-pix_fmt", "yuv420p", out]
+            cmd += ["-map", "0:a?", "-c:a", "aac"] + FINAL_ENCODE + [out]
             r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr[-1400:])
+        loudness.normalize(out)         # -14 LUFS for YouTube; non-fatal on failure
         outs.append(out)
         print(f"  finished {os.path.basename(out)}")
     return outs

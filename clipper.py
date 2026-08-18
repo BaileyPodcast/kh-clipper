@@ -29,7 +29,8 @@ import json
 import os
 
 from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
-                 review, audiogram, kinetic, moments as moments_mod)
+                 review, audiogram, kinetic, tighten,
+                 moments as moments_mod)
 
 
 def _transcribe_local(source_path, provider, episode_id=None, output_root="output", usage_ctx=None):
@@ -80,21 +81,24 @@ def _transcribe(url, provider, output_root="output", usage_ctx=None):
 
 
 def _finish(vertical, words, out_base, banner, highlight_word, safety, clip_index,
-            caption_style="classic"):
+            caption_style="classic", loopable=False):
     """Branch at the finish stage (KH-MGX-001 Wave 2): 'kinetic' renders via
     the Remotion premium layer (src.kinetic); 'classic' (default) is the
     existing libass path (src.caption), unchanged. A kinetic failure never
     costs the clip -- falls back to classic, the same best-effort pattern
     already used throughout this pipeline (reframe's pan fallback, Wave 1's
-    punch-in fallback)."""
+    punch-in fallback). `loopable` (from the rerank result) lets both styles
+    drop the CTA end cards on a short seamless-loop clip."""
     if caption_style == "kinetic":
         try:
             return kinetic.finish(vertical, words, out_base, banner=banner,
-                                  highlight_word=highlight_word, safety=safety)
+                                  highlight_word=highlight_word, safety=safety,
+                                  loopable=loopable)
         except Exception as e:
             print(f"      ~ kinetic render failed ({str(e)[:160]}); falling back to classic")
     return caption.finish(vertical, words, out_base, banner=banner,
-                          highlight_word=highlight_word, safety=safety, clip_index=clip_index)
+                          highlight_word=highlight_word, safety=safety, clip_index=clip_index,
+                          loopable=loopable)
 
 
 def run(url=None, provider="grok", transcript=None, source=None,
@@ -102,7 +106,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
         series=None, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
         guest_name=None, moments=None, usage_ctx=None, caption_style="classic",
-        clip_type="best", reviewer_anchors=None):
+        clip_type="best", reviewer_anchors=None, hook_phrases=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
     `output_root` roots all written files (use a temp dir from a worker)."""
@@ -165,7 +169,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
         print(f"[2/5] Detecting Kintsugi moments (top {count})"
               + ("" if use_llm else " (heuristic only)"))
         result = detect.detect(tpath, use_llm=use_llm, top_n=count, usage_ctx=usage_ctx,
-                               clip_type=clip_type, reviewer_anchors=reviewer_anchors)
+                               clip_type=clip_type, reviewer_anchors=reviewer_anchors,
+                               audio_path=tdata.get("audio_path"))
         json.dump(result, open(cpath, "w"), indent=2)
         n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
         print(f"      {len(result['clips'])} moments ({n_ok} ok, "
@@ -189,7 +194,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             metadata.generate(result["clips"],
                               result.get("title") or tdata.get("title", ""), ep_url,
                               guest_name=guest_name, series=series, usage_ctx=usage_ctx,
-                              clip_type=clip_type)
+                              clip_type=clip_type, hook_phrases=hook_phrases)
             json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
             n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
             print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
@@ -225,6 +230,10 @@ def run(url=None, provider="grok", transcript=None, source=None,
     title_by_id = {c.get("clip_id"): (c.get("metadata") or {}).get("title")
                    for c in result["clips"]}
     hookline_by_id = {c.get("clip_id"): c.get("hook_line") for c in result["clips"]}
+    # Map clip_id -> loopable (from the rerank result) so a short seamless-loop
+    # clip ships with no CTA end cards over its loop seam.
+    loopable_by_id = {c.get("clip_id"): bool(c.get("loopable", False))
+                      for c in result["clips"]}
 
     # Stages 4-5 — reframe + caption/CTA/logo per clip
     _p("render", 70, "reframing + captioning + branding")
@@ -236,6 +245,21 @@ def run(url=None, provider="grok", transcript=None, source=None,
         cut_file = os.path.join(os.path.dirname(cpath) or ".", c["file"])
         vertical = os.path.join(final_dir, f"{c['clip_id']}_v.mp4")
         try:
+            # Silence tightening (10k standard): compress technical dead air inside
+            # the clip, never a loaded pause, never a CALM clip. Runs on the cut
+            # file BEFORE reframe so face tracking and captions see the same frames.
+            plan = tighten.plan_tighten(words_all, c["start"], c["end"],
+                                        c.get("safety", "ok"))
+            if plan:
+                tightened = cut_file.replace(".mp4", "_tight.mp4")
+                try:
+                    tighten.apply_tighten(cut_file, plan, tightened)
+                    cut_file = tightened
+                    print(f"      ~ {c['clip_id']} tightened: "
+                          f"{tighten.total_removed(plan)}s of dead air compressed")
+                except Exception as e:
+                    plan = []
+                    print(f"      ~ tighten skipped ({str(e)[:120]})")
             # Diarized speech windows: tell reframe WHEN the hero speaks inside this
             # clip so face-follow locks onto the right person on a two-shot.
             speech = reframe.speech_windows(words_all, c["start"], c["end"],
@@ -245,6 +269,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
                                       speech=speech)
             c["framing"] = framing                    # carry into REVIEW.md
             words = caption.clip_words(words_all, c["start"], c["end"])
+            if plan:
+                words = tighten.remap_words(words, plan)
             # Kinetic captions (KH-MGX-001): highlight_word + safety (-> CALM preset
             # for anything not "ok") + clip index (alternates the punch-in direction).
             # caption_style picks classic (libass, Wave 1) or kinetic (Remotion, Wave 2).
@@ -252,7 +278,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
                           banner=banner_by_id.get(c["clip_id"]),
                           highlight_word=c.get("highlight_word"),
                           safety=c.get("safety", "ok"), clip_index=i,
-                          caption_style=caption_style)
+                          caption_style=caption_style,
+                          loopable=loopable_by_id.get(c["clip_id"], False))
             # No appended end screen (1.6, decided 2026-08-05) — an appended outro
             # broke the loop rerank.py rewards. The final frame is real story
             # footage; the brand moment lives in the CTA end cards instead.
@@ -317,6 +344,11 @@ def run(url=None, provider="grok", transcript=None, source=None,
             "clip_type": clip.get("clip_type", clip_type),   # echoed on every clip (KH-CTP-001)
             "archetype": clip.get("archetype"),
             "hook_line": clip.get("hook_line"),
+            # Selection data for the manifest (locked cross-repo contract):
+            # `score` is the final 0-100 fit score, `hook` the hook line,
+            # alongside the existing `loopable`. Every existing field stays.
+            "score": clip.get("fit_score"),
+            "hook": clip.get("hook_line"),
             "why": clip.get("why", ""),
             "hook_formula": clip.get("hook_formula", "none"),
             "loopable": clip.get("loopable", False),
@@ -390,11 +422,25 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     # Re-derive the diarized guest speaker from the stored transcript words (same
     # rule detect.py used on the original job) so a per-clip reframe/replace gets
     # the same hero-locked framing as the full run.
+    # Same silence tightening as the full run, so a reframe/replace re-render
+    # ships the same pacing as the original render.
+    plan = tighten.plan_tighten(words_all or [], start, end,
+                                spec.get("safety", "ok"))
+    if plan:
+        tightened = cut_file.replace(".mp4", "_tight.mp4")
+        try:
+            tighten.apply_tighten(cut_file, plan, tightened)
+            cut_file = tightened
+        except Exception as e:
+            plan = []
+            print(f"      ~ tighten skipped ({str(e)[:120]})")
     speech = reframe.speech_windows(words_all or [], start, end,
                                     detect.identify_guest(words_all or []))
     framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode,
                               offset=reframe_offset, speech=speech)
     words = caption.clip_words(words_all or [], start, end)
+    if plan:
+        words = tighten.remap_words(words, plan)
     # Kinetic captions (KH-MGX-001), same rules as the full run: highlight_word +
     # safety (-> CALM preset) + index (alternates the punch-in direction). No
     # appended end screen (1.6) — the final frame is real story footage.
@@ -402,7 +448,8 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     outs = _finish(vertical, words, os.path.join(final_dir, cid), banner=banner,
                    highlight_word=spec.get("highlight_word"),
                    safety=spec.get("safety", "ok"), clip_index=index,
-                   caption_style=caption_style)
+                   caption_style=caption_style,
+                   loopable=bool(spec.get("loopable", False)))
     if make_audiogram:
         try:
             audiogram.render(cut_file, words, os.path.join(final_dir, cid), series=series,
@@ -432,6 +479,9 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
         "clip_type": spec.get("clip_type", "best"),   # stable across reframe/replace
         "archetype": spec.get("archetype"),
         "hook_line": spec.get("hook_line"),
+        # Selection data (locked cross-repo contract), same fields as run().
+        "score": spec.get("fit_score", spec.get("score")),
+        "hook": spec.get("hook_line"),
         "why": spec.get("why", ""),
         "hook_formula": spec.get("hook_formula", "none"),
         "loopable": spec.get("loopable", False),

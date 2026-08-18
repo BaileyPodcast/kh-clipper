@@ -22,6 +22,17 @@ from src import brand
 
 C = brand.CTA
 
+# A loopable clip under this length skips the end cards entirely so its loop
+# seam stays a clean hard cut (rerank rewards a seamless replay; end cards on
+# the final seconds would break it). The soft early nudge is unchanged.
+LOOPABLE_SUPPRESS_MAX_SEC = 25.0
+
+
+def suppress_end_cards(duration: float, loopable: bool) -> bool:
+    """True when a clip should ship with NO end cards: it loops seamlessly AND
+    is short enough that the replay is the point. Pure, unit-testable."""
+    return bool(loopable) and duration < LOOPABLE_SUPPRESS_MAX_SEC
+
 
 def _t(t: float) -> str:
     t = max(0.0, t)
@@ -60,7 +71,8 @@ def _arrow(x, y, t0, t1, size=86):
 
 
 def build_cta_events(duration: float, variant: str = "shorts",
-                     frame=(1080, 1920), suppress_soft: bool = False) -> list[str]:
+                     frame=(1080, 1920), suppress_soft: bool = False,
+                     loopable: bool = False) -> list[str]:
     W, H = frame
     cx = W // 2
     cp = C["copy"]
@@ -75,6 +87,11 @@ def build_cta_events(duration: float, variant: str = "shorts",
     if duration > 7 and not suppress_soft:
         events.append(_pill(cp["subscribe_soft"], cx, C["soft_y"], s0, s1,
                             accent_word="Subscribe"))
+
+    # A short loopable clip ships with no end cards at all, the loop seam
+    # must stay a clean hard cut (the soft nudge above is unchanged).
+    if suppress_end_cards(duration, loopable):
+        return events
 
     # 2) End cards (last end_window_sec, split into two rotating cards)
     win = min(C["end_window_sec"], max(2.0, duration - (s1 + 0.5)))

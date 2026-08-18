@@ -50,11 +50,25 @@ THE 4-SECOND HOOK ENGINE (the edge — 50-60% of viewers swipe in the first 3 se
 - The clip's FIRST spoken words must BE the hook line. No setup, no host question, no "um/so/yeah".
 - A complete, charged hook (emotion word, turn marker, number, or curiosity gap) must land \
 INSIDE the first 4 seconds.
+- The hook must answer TWO questions inside those first 4 seconds: what is this about (the \
+SUBJECT), and what do I get if I keep watching (the STAKES). A hook that answers only one \
+of the two is weak; score it down.
+- Judge every hook on the 4 S's: SUBJECT (the topic is instantly clear), STAKES (a reason to \
+stay is instantly clear), SPEED (maximum compression, not a single wasted word), and SUPER \
+CLEAR (plain words, interpretable one way and one way only).
 - The hook is ALWAYS the guest, never the host's question.
 - Shape the hook toward one of the KH hook formulas above where the guest's words allow it, \
 but NEVER invent words the guest did not say.
 - loopable: mark true only when the clip's closing line flows naturally back into its hook so \
 it replays seamlessly. Never force or fabricate a loop.
+
+THE LOCK-IN ZONE (seconds ~5-10), check it before scoring:
+- Seconds ~5-10 must CONFIRM the hook's claim and stay on its subject. Never drift to a \
+different topic, a different moment, or backstory the hook did not promise.
+- A concrete specific (a number, a named detail) landing inside seconds ~4-12 is a strong \
+positive; reward it in the score.
+- Penalise bait-and-switch hard: a hook that promises one thing while the middle delivers \
+another burns trust and the viewer swipes. Score it down even when both halves are good alone.
 
 Avoid: motivational platitudes, vague reflections, interviewer questions, anything that needs \
 context to make sense.

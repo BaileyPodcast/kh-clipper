@@ -43,6 +43,8 @@ MAX_LEN_SEC = 35       # HARD CEILING for social/Shorts/Reels — never exceed 3
 PAYOFF_WINDOW_SEC = 4  # the charged hook must land within this many secs (the 4s window)
 TOP_N = 5              # how many final clips to surface (KH: exactly 5 finished Shorts)
 SHORTLIST_N = 30       # how many heuristic candidates to hand Grok to judge
+LOOPABLE_RANK_BONUS = 8  # final-ordering reward for a seamless loop; loops have
+                         # counted as views since March 2025 (raised from 4)
 
 # Archetypes (length bands from the audit)
 ARCHETYPES = [
@@ -453,8 +455,19 @@ def _tokens(text):
     return re.findall(r"[a-z']+", text.lower())
 
 
-def score_candidate(c, clip_type="best", band_override=None):
-    """band_override — optional (target_band, allowed_band) pair that REPLACES the
+# Audio-emotion bonus ceiling. The bonus (src/emotion.py) is additive and
+# capped BELOW the off-theme penalty (10) and far below the safety machinery,
+# so an emotional delivery can nudge ranking but never overcome a values or
+# relevance rejection. A bonus, never a gate.
+EMOTION_BONUS_CAP = 8.0
+
+
+def score_candidate(c, clip_type="best", band_override=None, emotion_bonus=0.0):
+    """emotion_bonus: optional precomputed audio-emotion bonus (0..8, from
+    src/emotion.py) for this candidate's window; clamped to EMOTION_BONUS_CAP
+    and ADDED to the total. 0.0 (default) keeps scoring byte-identical to the
+    transcript-only path.
+    band_override — optional (target_band, allowed_band) pair that REPLACES the
     type profile's own bands for the length-scoring step only (everything else
     about the type's lens — weights, markers, hard constraints — is unchanged).
     None (default) = the type's own Shorts-tuned bands, unchanged behaviour.
@@ -587,6 +600,12 @@ def score_candidate(c, clip_type="best", band_override=None):
         if hook.strip().endswith("?") or any(m in hook_low.split() for m in TURN_MARKERS):
             type_bonus += profile["curiosity_bonus"]
 
+    # Audio-emotion bonus (src/emotion.py): additive only, clamped so it can
+    # never outweigh the safety/off-theme penalties. Zero when no audio ran.
+    _emo = min(max(float(emotion_bonus or 0.0), 0.0), EMOTION_BONUS_CAP)
+    if _emo > 0:
+        breakdown["emotion_audio"] = round(_emo, 1)
+
     w = profile["weights"]
     total = (
         breakdown["hook"] * 2.0 * w["hook"]
@@ -596,6 +615,7 @@ def score_candidate(c, clip_type="best", band_override=None):
         + breakdown["length"] * 1.0 * w["length"]
         + dignity_bonus * w["agency"]
         + type_bonus
+        + _emo
         - cliche_penalty
         - off_theme_penalty
         - sensation_penalty
@@ -679,8 +699,37 @@ def suppress_overlaps(clips, max_overlap=0.5):
 # Public entry point
 # ======================================================================
 
+def _emotion_bonuses(candidates, audio_path):
+    """Per-candidate audio-emotion bonuses (src/emotion.py), or None when the
+    audio signal is unavailable for any reason. Best-effort by design: a
+    missing file, missing ffmpeg or missing numpy silently yields None and the
+    caller scores transcript-only, exactly as today."""
+    if not audio_path or not candidates:
+        return None
+    try:
+        try:
+            from . import emotion             # imported as a package
+        except ImportError:
+            import emotion                    # run as a script
+        pcm = emotion.load_pcm(audio_path)
+        if pcm is None:
+            return None
+        median = emotion.file_median_rms(pcm, emotion.SAMPLE_RATE)
+        bonuses = []
+        for c in candidates:
+            cand_words = [w for s in c["sentences"] for w in s["words"]]
+            feats = emotion.window_features(
+                pcm, emotion.SAMPLE_RATE, c["start"], c["end"],
+                words=cand_words, file_median=median)
+            bonuses.append(emotion.emotion_bonus(feats))
+        return bonuses
+    except Exception:
+        return None
+
+
 def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
-           clip_type="best", reviewer_anchors=None, band_override=None):
+           clip_type="best", reviewer_anchors=None, band_override=None,
+           audio_path=None):
     """`clip_type` (KH-CTP-001) picks the selection lens from TYPE_PROFILES;
     "best" is bit-identical to the legacy scoring. `reviewer_anchors` is an
     optional list of Episode Reviewer evidence quotes, passed to the Grok
@@ -688,7 +737,10 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
     (KH-AUD-001) — optional (target_band, allowed_band) pair; when given, both
     candidate-window building and scoring use it instead of the Shorts 8-35s
     limits and the type's own Shorts-tuned band. None (default) = unchanged
-    Shorts behaviour."""
+    Shorts behaviour. `audio_path`: optional path to the episode audio (the
+    transcription wav); when given, each candidate window earns a small
+    audio-emotion bonus (src/emotion.py, capped at EMOTION_BONUS_CAP, a bonus
+    never a gate). None (default) = byte-identical transcript-only scoring."""
     if clip_type not in TYPE_PROFILES:
         clip_type = "best"                 # unknown type degrades to current behaviour
     data = json.loads(Path(transcript_path).read_text())
@@ -700,8 +752,10 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
     candidates = build_candidates(sentences, guest_speaker,
                                   min_len_sec=min_len, max_len_sec=max_len)
 
-    scored = [s for s in (score_candidate(c, clip_type=clip_type, band_override=band_override)
-                          for c in candidates) if s]
+    emo_bonuses = _emotion_bonuses(candidates, audio_path)
+    scored = [s for s in (score_candidate(c, clip_type=clip_type, band_override=band_override,
+                                          emotion_bonus=(emo_bonuses[i] if emo_bonuses else 0.0))
+                          for i, c in enumerate(candidates)) if s]
     deduped = suppress_overlaps(scored)
     heuristic_ranked = sorted(deduped, key=lambda x: x["fit_score"], reverse=True)
 
@@ -752,10 +806,13 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
                 chosen.append(base)
             if chosen:
                 # Reward loopable clips in the final ranking (a clip that replays
-                # seamlessly earns more watch time). Tiebreak only — never inflates
-                # the stored fit_score, and never fabricates a loop.
+                # seamlessly earns more watch time, and loops have counted as
+                # views since March 2025, so the weight is +8, raised from +4).
+                # Tiebreak only. Never inflates the stored fit_score, and never
+                # fabricates a loop.
                 chosen.sort(
-                    key=lambda c: c.get("fit_score", 0) + (4 if c.get("loopable") else 0),
+                    key=lambda c: c.get("fit_score", 0)
+                    + (LOOPABLE_RANK_BONUS if c.get("loopable") else 0),
                     reverse=True,
                 )
                 top = chosen[:top_n]

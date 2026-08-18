@@ -80,6 +80,45 @@ def test_language_gate_flags_banned_word_and_em_dash():
     assert guardrails.check_language("He stopped hiding — for good") != []  # em dash
 
 
+def test_banner_hook_hard_rules_are_in_the_system_prompt():
+    sp = metadata.SYSTEM_PROMPT
+    assert "ALIGN with the clip's FIRST SPOKEN WORDS" in sp
+    assert "never a verbatim copy of the captions" in sp
+    assert "At most 2 lines and about 7 words total" in sp
+    assert "No punctuation at all except quotation marks or parentheses" in sp
+    assert "No compound or transition words (and, or, but, that, therefore)" in sp
+    assert "a number, a named detail" in sp
+    assert "interpretable one way and one way only" in sp
+
+
+def test_hook_phrase_block_absent_is_empty():
+    assert metadata.hook_phrase_block(None) == ""
+    assert metadata.hook_phrase_block([]) == ""
+    assert metadata.hook_phrase_block(["  ", ""]) == ""
+
+
+def test_hook_phrase_block_lists_phrases_as_directions_not_copy():
+    block = metadata.hook_phrase_block(["He lost everything twice", "3 years sober"])
+    assert '- "He lost everything twice"' in block
+    assert '- "3 years sober"' in block
+    assert "never" in block and "verbatim" in block
+    assert "Remix the psychology" in block
+
+
+def test_generate_feeds_hook_phrases_into_the_user_prompt(monkeypatch):
+    seen = {}
+
+    def spy(system_prompt, user_prompt, model, api_key):
+        seen["user"] = user_prompt
+        return json.dumps({"packs": [_clean_pack(0)]}), {"input_tokens": 1, "output_tokens": 1}
+
+    monkeypatch.setattr(metadata, "_call_model", spy)
+    metadata.generate([_clip()], "T", "", api_key="test-key", series="golden-threads",
+                      hook_phrases=["He lost everything twice"])
+    assert 'He lost everything twice' in seen["user"]
+    assert "Remix the psychology" in seen["user"]
+
+
 def test_generate_raises_when_no_packs(monkeypatch):
     monkeypatch.setattr(metadata, "_call_model", _fake_model([]))
     try:

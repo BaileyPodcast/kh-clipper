@@ -497,7 +497,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
                 guest_name: str = None, transcript: dict = None, moments: list = None,
                 caption_style: str = "classic", clip_type: str = "best",
-                reviewer_anchors: list = None):
+                reviewer_anchors: list = None, hook_phrases: list = None):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -531,6 +531,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
                 moments=moments, caption_style=caption_style,
                 clip_type=clip_type, reviewer_anchors=reviewer_anchors,
+                hook_phrases=hook_phrases,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": file_id},
             )
         else:
@@ -541,6 +542,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 guest_name=guest_name, transcript=tpath, moments=moments,
                 caption_style=caption_style,
                 clip_type=clip_type, reviewer_anchors=reviewer_anchors,
+                hook_phrases=hook_phrases,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": _youtube_id(url)},
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
@@ -939,6 +941,11 @@ def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                 "why": "", "safety": pick.get("safety", "ok"),
                 "safety_note": pick.get("safety_note", ""), "text": pick.get("text", ""),
                 "highlight_word": pick.get("highlight_word", ""),   # KH-MGX-001 1.2
+                # Selection data for the manifest entry (score/hook/loopable):
+                # pool entries carry the heuristic fit_score; loopable is only
+                # ever set by the Grok judgment pass, so a pool pick is False.
+                "fit_score": pick.get("fit_score"),
+                "loopable": bool(pick.get("loopable", False)),
                 # KH-CTP-001: the pool entry was scored under the job's type;
                 # carry it so the fresh metadata pack keeps the same lens.
                 "clip_type": pick.get("clip_type") or outputs.get("clip_type") or "best",
@@ -1210,6 +1217,12 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
     reviewer_anchors = payload.get("reviewer_anchors")
     if reviewer_anchors is not None and not isinstance(reviewer_anchors, list):
         raise fastapi.HTTPException(status_code=400, detail="reviewer_anchors must be a list")
+    # hook_phrases: proven phrases mined from KH's own winning Shorts, fed to the
+    # metadata prompt as phrase directions (remix the psychology, never copy).
+    hook_phrases = payload.get("hook_phrases")
+    if hook_phrases is not None:
+        if not isinstance(hook_phrases, list) or not all(isinstance(p, str) for p in hook_phrases):
+            raise fastapi.HTTPException(status_code=400, detail="hook_phrases must be a list of strings")
 
     process_job.spawn(
         payload["job_id"], payload["url"], payload.get("series"),
@@ -1233,5 +1246,7 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         # optional advisory Episode Reviewer anchors for typed jobs.
         clip_type,
         reviewer_anchors,
+        # Data-backed hook-phrase directions for the metadata prompt (or None).
+        hook_phrases,
     )
     return {"accepted": True, "job_id": payload["job_id"]}
