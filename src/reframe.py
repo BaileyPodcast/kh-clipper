@@ -9,11 +9,16 @@ between host and guest, which kills the intimacy. So:
     MediaPipe BlazeFace) — not "whichever face is biggest this frame", which in a
     two-person shot ping-pongs between host and guest and lands the crop in the gap.
   - One subject  -> re-centre the 9:16 crop on the guest (handles off-centre solos too).
-  - Two-plus subjects -> follow the one who is SPEAKING (the face whose mouth moves in
-    time with the audio = the guest), and lock the crop to them so the host stays out.
-  - We can't tell who's speaking (both talk equally, or no lip/audio signal on
-    same-size faces), OR face detection is unavailable on a diarized interview ->
-    keep the centre-crop and flag the clip `framing: review` so a producer checks it.
+  - Two-plus subjects -> follow the HERO. First choice: match each face's lip motion
+    against the diarized transcript's guest speech windows (`speech=` from
+    speech_windows()) — the hero is the face that moves when the transcript says the
+    hero talks. Fallback: the face whose mouth moves in time with the audio. Either
+    way the crop locks to them so the host stays out; on a split-screen composite the
+    crop is also clamped inside the hero's tile so the seam never enters frame.
+  - We still can't tell who's the hero (both talk equally, no lip/audio signal on
+    same-size faces) -> render fit-both (whole frame over a blurred fill, both people
+    deliberately in shot) and flag the clip `framing: review` so a producer checks it.
+    Face detection unavailable on a diarized interview -> centre-crop + `review`.
     We never ship a bad crop silently, and never pick a subject at random.
 
 `reframe()` keeps its original signature (src, out) plus optional `guest`/`mode`, and
@@ -43,6 +48,40 @@ _SIDE_ANCHOR = {"left": 0.30, "right": 0.70}
 
 # How far a nudge can bias the crop, as a fraction of source width (both directions).
 _MAX_OFFSET = 0.35
+
+# Words closer together than this (seconds) merge into one speech window.
+_WINDOW_GAP = 0.6
+
+
+def speech_windows(words, start, end, guest_speaker):
+    """Clip-relative speech windows from the diarized transcript, for face.analyze:
+    {"guest": [(t0, t1), ...], "others": [(t0, t1), ...]} — when the GUEST speaks and
+    when anyone else does, inside [start, end], rebased so t=0 is the cut clip's first
+    frame. Returns None when the transcript has no usable diarization (no speaker
+    labels, or no identified guest), so the caller falls back to audio-only analysis."""
+    if guest_speaker is None:
+        return None
+    guest, others = [], []
+    for w in words or []:
+        sp = w.get("speaker")
+        if sp is None:
+            continue
+        try:
+            ws, we = float(w["start"]), float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if we <= start or ws >= end:
+            continue
+        t0 = max(0.0, ws - start)
+        t1 = max(0.0, min(we, end) - start)
+        dest = guest if sp == guest_speaker else others
+        if dest and t0 - dest[-1][1] <= _WINDOW_GAP:
+            dest[-1] = (dest[-1][0], max(dest[-1][1], t1))
+        else:
+            dest.append((t0, t1))
+    if not guest:
+        return None
+    return {"guest": guest, "others": others}
 
 
 def _probe_dims(src):
@@ -121,14 +160,33 @@ def _write_faceband(out, info):
         pass
 
 
-def _follow_vf(w, h, src_w, src_h, guest_cx):
+def _x_range(crop_w, src_w, bounds):
+    """Valid [lo, hi] for the crop's left edge. `bounds` is the guest's tile (lo, hi)
+    on a side-by-side composite: the crop stays inside it so the seam and the other
+    person's tile never enter frame. A tile narrower than the crop can't contain it,
+    so we centre the crop on the tile instead (minimises the spill)."""
+    lo, hi = 0, src_w - crop_w
+    if bounds:
+        b_lo, b_hi = bounds
+        if b_hi - b_lo >= crop_w:
+            lo = max(lo, int(round(b_lo)))
+            hi = min(hi, int(round(b_hi - crop_w)))
+        else:
+            mid = int(round((b_lo + b_hi) / 2 - crop_w / 2))
+            lo = hi = max(0, min(mid, src_w - crop_w))
+    return lo, hi
+
+
+def _follow_vf(w, h, src_w, src_h, guest_cx, bounds=None):
     """Crop a full-height 9:16 slice centred on guest_cx (source pixels), then scale
-    up to the target frame. Falls back to centre if inputs look wrong."""
+    up to the target frame. Falls back to centre if inputs look wrong. `bounds` keeps
+    the slice inside the guest's tile on a split-screen source."""
     crop_w = max(1, round(src_h * w / h))          # 9:16 slice at full source height
     if crop_w >= src_w:                            # source already narrower than slice
         return _centre_vf(w, h)
+    lo, hi = _x_range(crop_w, src_w, bounds)
     x = int(round(guest_cx - crop_w / 2))
-    x = max(0, min(x, src_w - crop_w))             # clamp inside the frame
+    x = max(lo, min(x, hi))                        # clamp inside frame + tile
     return f"crop={crop_w}:{src_h}:{x}:0,scale={w}:{h},setsar=1"
 
 
@@ -144,16 +202,17 @@ def _smooth(xs, window=3):
     return out
 
 
-def _pan_keyframes(track, crop_w, src_w, max_kf=24):
+def _pan_keyframes(track, crop_w, src_w, max_kf=24, bounds=None):
     """Turn a per-frame face track into a small set of clamped (t, x) keyframes for a
     smoothed pan. x is the crop's left edge. Returns None when there isn't enough signal
     to pan (caller falls back to the static follow/centre crop).
 
-    Keyframe x values are pre-clamped to [0, src_w-crop_w]; because linear interpolation
-    between two in-range values stays in range, the runtime expression can never crop
-    outside the frame — no min/max guard needed in the ffmpeg expr."""
+    Keyframe x values are pre-clamped to the valid range (the frame, intersected with
+    the guest's tile when `bounds` is set); because linear interpolation between two
+    in-range values stays in range, the runtime expression can never crop outside the
+    frame or across a split-screen seam — no min/max guard needed in the ffmpeg expr."""
     pts = sorted((t, cx) for (t, cx) in (track or []) if cx is not None)
-    lo, hi = 0, src_w - crop_w
+    lo, hi = _x_range(crop_w, src_w, bounds)
     if len(pts) < 4 or hi <= lo:
         return None
     xs = [int(round(min(hi, max(lo, x - crop_w / 2.0)))) for x in _smooth([cx for _, cx in pts])]
@@ -184,20 +243,20 @@ def _pan_expr(kf):
     return f"if(lt(t\\,{kf[0][0]})\\,{kf[0][1]}\\,{e})"   # before first keyframe: hold x0
 
 
-def _track_vf(w, h, src_w, src_h, track):
+def _track_vf(w, h, src_w, src_h, track, bounds=None):
     """Time-varying 9:16 crop that pans to follow the speaker across the clip. Returns a
     -vf string, or None if there isn't enough track to pan (caller uses the static crop)."""
     crop_w = max(1, round(src_h * w / h))
     if crop_w >= src_w:
         return None
-    kf = _pan_keyframes(track, crop_w, src_w)
+    kf = _pan_keyframes(track, crop_w, src_w, bounds=bounds)
     if not kf:
         return None
     return f"crop=w={crop_w}:h={src_h}:x={_pan_expr(kf)}:y=0,scale={w}:{h},setsar=1"
 
 
 def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_face=None,
-            offset=0.0):
+            offset=0.0, speech=None):
     """Reframe 16:9 -> 9:16. Returns the framing flag: "ok" or "review".
 
     `mode` is the studio `reframe` request:
@@ -210,7 +269,9 @@ def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_fa
       - "fit"               -> show the whole frame so both people stay in shot.
     `offset` nudges the crop left (negative) or right (positive) as a fraction of source
     width, applied to speaker/center/left/right (ignored by "fit"). `use_face` overrides
-    the speaker/center decision when set explicitly (CLI)."""
+    the speaker/center decision when set explicitly (CLI). `speech` is the
+    speech_windows() dict (the diarized guest/other speaking windows, clip-relative) —
+    when present, face.analyze matches lip motion against it to identify the hero."""
     w, h = frame
     m = str(mode or "speaker").strip().lower()
     off = max(-_MAX_OFFSET, min(_MAX_OFFSET, float(offset or 0.0)))
@@ -250,7 +311,8 @@ def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_fa
         return "review" if guest is not None else "ok"
 
     try:
-        info = face.analyze(src)
+        info = face.analyze(src, guest_windows=(speech or {}).get("guest"),
+                            other_windows=(speech or {}).get("others"))
     except Exception as e:                          # detection failed at runtime
         print(f"      ~ face-follow unavailable ({str(e)[:80]}); centre-crop")
         _run_ff(_centre_vf(w, h), src, out)
@@ -258,22 +320,28 @@ def reframe(src: str, out: str, frame=(W, H), guest=None, mode="speaker", use_fa
 
     face_mode, cx = info["mode"], info["guest_cx"]
     if face_mode == "ambiguous" or cx is None:
-        # Two comparable faces — don't guess. Centre-crop and let a producer check.
-        _run_ff(_centre_vf(w, h), src, out)
+        # Two comparable faces and we can't tell which is the hero — don't guess.
+        # Show BOTH people deliberately (fit-both: whole frame over a blurred fill)
+        # instead of a centre-crop that slices half a face off each side of a
+        # split-screen, and flag it so a producer checks. Never a bad crop silently.
+        _run_fit(w, h, src, out)
         return "review"
 
+    bounds = info.get("bounds")
     # A producer nudge on the auto crop: bias the anchor and hold it static (a moving
     # pan fighting a manual offset would just look like drift). _follow_vf clamps x.
     if off:
-        _run_ff(_follow_vf(w, h, info["width"], info["height"], cx + off * info["width"]), src, out)
+        _run_ff(_follow_vf(w, h, info["width"], info["height"], cx + off * info["width"],
+                           bounds=bounds), src, out)
         _write_faceband(out, info)
         return "ok"
 
     # single or follow: pan with the speaker over time, falling back to a static crop
     # centred on the guest if we can't build a pan. A malformed pan expression must
     # never cost us the clip, so retry the static crop if ffmpeg rejects the pan.
-    static_vf = _follow_vf(w, h, info["width"], info["height"], cx)
-    pan_vf = _track_vf(w, h, info["width"], info["height"], info.get("track"))
+    static_vf = _follow_vf(w, h, info["width"], info["height"], cx, bounds=bounds)
+    pan_vf = _track_vf(w, h, info["width"], info["height"], info.get("track"),
+                       bounds=bounds)
     _write_faceband(out, info)
     if pan_vf is None:
         _run_ff(static_vf, src, out)

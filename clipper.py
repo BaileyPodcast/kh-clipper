@@ -236,8 +236,13 @@ def run(url=None, provider="grok", transcript=None, source=None,
         cut_file = os.path.join(os.path.dirname(cpath) or ".", c["file"])
         vertical = os.path.join(final_dir, f"{c['clip_id']}_v.mp4")
         try:
+            # Diarized speech windows: tell reframe WHEN the hero speaks inside this
+            # clip so face-follow locks onto the right person on a two-shot.
+            speech = reframe.speech_windows(words_all, c["start"], c["end"],
+                                            result.get("guest_speaker"))
             framing = reframe.reframe(cut_file, vertical,
-                                      guest=result.get("guest_speaker"), mode=reframe_mode)
+                                      guest=result.get("guest_speaker"), mode=reframe_mode,
+                                      speech=speech)
             c["framing"] = framing                    # carry into REVIEW.md
             words = caption.clip_words(words_all, c["start"], c["end"])
             # Kinetic captions (KH-MGX-001): highlight_word + safety (-> CALM preset
@@ -382,8 +387,13 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     banner = meta.get("banner_hook")
 
     vertical = os.path.join(final_dir, f"{cid}_v.mp4")
+    # Re-derive the diarized guest speaker from the stored transcript words (same
+    # rule detect.py used on the original job) so a per-clip reframe/replace gets
+    # the same hero-locked framing as the full run.
+    speech = reframe.speech_windows(words_all or [], start, end,
+                                    detect.identify_guest(words_all or []))
     framing = reframe.reframe(cut_file, vertical, guest=guest_name, mode=reframe_mode,
-                              offset=reframe_offset)
+                              offset=reframe_offset, speech=speech)
     words = caption.clip_words(words_all or [], start, end)
     # Kinetic captions (KH-MGX-001), same rules as the full run: highlight_word +
     # safety (-> CALM preset) + index (alternates the punch-in direction). No
