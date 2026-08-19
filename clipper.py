@@ -25,12 +25,25 @@ Pipeline (each stage in src/):
 Output: output/final/<clip_id>_shorts.mp4  and  _universal.mp4
 """
 import argparse
+import concurrent.futures
 import json
 import os
+import threading
 
 from src import (fetch, transcribe, detect, metadata, cut, reframe, caption,
                  review, audiogram, kinetic, tighten,
                  moments as moments_mod)
+
+# Per-clip rendering (Stages 4-5, in run()) runs CONCURRENTLY across clips: each
+# clip's work is independent once cut, and every step is an ffmpeg (or Node, for
+# kinetic captions) subprocess call that releases the GIL while it runs, so a
+# thread pool gives real wall-clock overlap without needing multiprocessing.
+# Matched to the Modal worker's `cpu=` request (worker/app.py JOB_CPU) -- more
+# threads than requested cores just means more ffmpeg processes fighting over
+# the same CPU budget, not more throughput. Override via KH_CLIP_WORKERS for a
+# local run on a bigger/smaller machine (`python clipper.py URL` with no worker
+# involved at all).
+CLIP_RENDER_WORKERS = int(os.environ.get("KH_CLIP_WORKERS", "4"))
 
 
 def _transcribe_local(source_path, provider, episode_id=None, output_root="output", usage_ctx=None):
@@ -216,6 +229,31 @@ def run(url=None, provider="grok", transcript=None, source=None,
             print(f"      ! metadata pack skipped: {str(e)[:160]}")
             print("        (videos still cut; fill title/description by hand)")
 
+    words_all = tdata["words"]
+
+    # 10k standard: pre-compute each clip's silence-tightening plan (pure, no
+    # ffmpeg — see src/tighten.py) BEFORE cutting, and attach it to the clip
+    # entry, so cut.run() can fold cut+tighten into ONE ffmpeg pass per clip
+    # instead of a full cut followed by a full second tighten re-encode (see
+    # src/cut.py cut_local_tightened + its module docstring). Local source
+    # only — combining tighten with the remote (YouTube) per-clip fetch is a
+    # different, riskier problem and stays the existing two-pass path below.
+    # Plans against exactly the window cut.run() will actually cut (same
+    # cut.resolve_window call cut.run() itself uses), so there's no drift
+    # between what gets planned and what gets cut.
+    if source:
+        for c in result["clips"]:
+            try:
+                w_start, w_end, _ = cut.resolve_window(
+                    float(c["start"]), float(c["end"]), max_sec)
+                plan = tighten.plan_tighten(words_all, w_start, w_end,
+                                            c.get("safety", "ok"))
+                if plan:
+                    c["_tighten_plan"] = plan
+            except (KeyError, TypeError, ValueError):
+                pass                      # malformed clip -- cut.run() will skip it too
+        json.dump(result, open(cpath, "w"), indent=2)
+
     # Stage 3 — cut
     _p("cut", 60, "cutting clips")
     print("[3/5] Cutting clips")
@@ -230,7 +268,6 @@ def run(url=None, provider="grok", transcript=None, source=None,
                 "candidate_pool": result.get("candidate_pool", []),
                 "transcript_source": transcript_source, "caption_style": caption_style,
                 "clip_type": clip_type}
-    words_all = tdata["words"]
 
     # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
     ep_id = tdata.get("id") or result.get("source") or "episode"
@@ -249,22 +286,41 @@ def run(url=None, provider="grok", transcript=None, source=None,
     loopable_by_id = {c.get("clip_id"): bool(c.get("loopable", False))
                       for c in result["clips"]}
 
-    # Stages 4-5 — reframe + caption/CTA/logo per clip
+    # Stages 4-5 — reframe + caption/CTA/logo per clip. Rendered CONCURRENTLY
+    # (see CLIP_RENDER_WORKERS above): each clip is fully self-contained after
+    # cutting (its own files, its own dict entry in `cuts`/`result["clips"]"),
+    # so the ONLY shared mutable state across threads is `finals` (appended
+    # under a lock below) and the progress counter. Per-clip fault isolation
+    # (one clip's exception never aborts the others) and the exact per-clip
+    # log lines are unchanged from the old sequential loop -- just now run
+    # from `_render_one`, one call per clip, dispatched to a thread pool.
     _p("render", 70, "reframing + captioning + branding")
     print("[4/5+5/5] Reframing + captioning + branding")
     finals = []
-    for i, c in enumerate(cuts):
-        _p("render", 70 + int(25 * i / max(1, len(cuts))),
-           f"clip {i + 1}/{len(cuts)}")
+    progress_lock = threading.Lock()
+    done = [0]                            # mutable counter threads can share
+
+    def _render_one(i, c):
         cut_file = os.path.join(os.path.dirname(cpath) or ".", c["file"])
         vertical = os.path.join(final_dir, f"{c['clip_id']}_v.mp4")
+        clip_finals = []
         try:
             # Silence tightening (10k standard): compress technical dead air inside
-            # the clip, never a loaded pause, never a CALM clip. Runs on the cut
-            # file BEFORE reframe so face tracking and captions see the same frames.
-            plan = tighten.plan_tighten(words_all, c["start"], c["end"],
-                                        c.get("safety", "ok"))
-            if plan:
+            # the clip, never a loaded pause, never a CALM clip. When cut.run()
+            # already combined cut+tighten into one ffmpeg pass (local source --
+            # see src/cut.py cut_local_tightened), `cut_file` IS the tightened
+            # clip already and the plan travels with it (`tighten_plan`); only
+            # the word/speech timings below still need remapping. Otherwise this
+            # is still the original two-pass path: tighten runs on the cut file
+            # BEFORE reframe so face tracking and captions see the same frames.
+            plan = c.get("tighten_plan")
+            if plan is None:
+                plan = tighten.plan_tighten(words_all, c["start"], c["end"],
+                                            c.get("safety", "ok"))
+            if plan and c.get("tightened"):
+                print(f"      ~ {c['clip_id']} tightened (combined pass): "
+                      f"{tighten.total_removed(plan)}s of dead air compressed")
+            elif plan:
                 tightened = cut_file.replace(".mp4", "_tight.mp4")
                 try:
                     tighten.apply_tighten(cut_file, plan, tightened)
@@ -303,7 +359,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             # No appended end screen (1.6, decided 2026-08-05) — an appended outro
             # broke the loop rerank.py rewards. The final frame is real story
             # footage; the brand moment lives in the CTA end cards instead.
-            finals.extend(outs)
+            clip_finals.extend(outs)
             # Opt-in branded audiograms (square + vertical) from the clip's audio.
             if make_audiogram:
                 a_outs = audiogram.render(cut_file, words,
@@ -312,7 +368,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
                                           caption=hookline_by_id.get(c["clip_id"]),
                                           title=title_by_id.get(c["clip_id"]),
                                           guest_name=guest_name)
-                finals.extend(a_outs)
+                clip_finals.extend(a_outs)
         except Exception as e:
             print(f"      ! {c['clip_id']} failed: {str(e)[:160]}")
         finally:
@@ -324,6 +380,20 @@ def run(url=None, provider="grok", transcript=None, source=None,
                     os.remove(sidecar)
             except OSError:
                 pass
+        with progress_lock:
+            done[0] += 1
+            _p("render", 70 + int(25 * done[0] / max(1, len(cuts))),
+               f"clip {done[0]}/{len(cuts)}")
+        return clip_finals
+
+    workers = max(1, min(CLIP_RENDER_WORKERS, len(cuts)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        # Submitted concurrently; .result() below just waits for each in turn
+        # (they're all already running) -- collecting results back on the main
+        # thread only, so `finals` itself needs no lock.
+        futures = [pool.submit(_render_one, i, c) for i, c in enumerate(cuts)]
+        for fut in futures:
+            finals.extend(fut.result())
 
     # Stage 6 — producer gate sheet. Carry framing flags back onto the picks too.
     framing_by_id = {c["clip_id"]: c.get("framing") for c in cuts}
@@ -414,14 +484,40 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     cid = spec["clip_id"]
     start, end = float(spec["start"]), float(spec["end"])
     # Same hard ceiling as the full pipeline (trim the END, keep the hook).
-    if end - start > cut.MAX_CLIP_SEC:
-        end = start + cut.MAX_CLIP_SEC
+    start, end, _ = cut.resolve_window(start, end, cut.MAX_CLIP_SEC)
+
+    # Same silence tightening as the full run, so a reframe/replace re-render
+    # ships the same pacing as the original render. Planned BEFORE cutting: on a
+    # local source this folds cut+tighten into ONE ffmpeg pass
+    # (cut.cut_local_tightened) instead of a full cut immediately followed by a
+    # full second tighten re-encode -- this is the interactive reframe/replace
+    # path a producer clicks and waits on live, so the extra pass is real
+    # wall-clock time in front of them. cut_local_tightened itself degrades to
+    # a plain cut when `plan` is empty, so this is a single call either way.
+    plan = tighten.plan_tighten(words_all or [], start, end, spec.get("safety", "ok"))
 
     cut_file = os.path.join(output_root, "clips", f"{cid}.mp4")
     if source:
-        cut.cut_local(source, start, end, cut_file)
+        try:
+            cut.cut_local_tightened(source, start, end, plan, cut_file)
+        except Exception as e:
+            plan = []
+            print(f"      ~ combined cut/tighten failed ({str(e)[:120]}), "
+                  f"falling back to a plain cut")
+            cut.cut_local(source, start, end, cut_file)
     else:
+        # Remote (YouTube) source: combining tighten with the ranged yt-dlp
+        # fetch is out of scope (see cut.cut_local_tightened's docstring) --
+        # same two-pass path as before.
         cut.cut_remote(url, start, end, cut_file)
+        if plan:
+            tightened_path = cut_file.replace(".mp4", "_tight.mp4")
+            try:
+                tighten.apply_tighten(cut_file, plan, tightened_path)
+                cut_file = tightened_path
+            except Exception as e:
+                plan = []
+                print(f"      ~ tighten skipped ({str(e)[:120]})")
 
     meta = dict(spec.get("metadata") or {})
     if with_metadata:
@@ -441,19 +537,8 @@ def render_clip(spec, url=None, source=None, words_all=None, series=None,
     vertical = os.path.join(final_dir, f"{cid}_v.mp4")
     # Re-derive the diarized guest speaker from the stored transcript words (same
     # rule detect.py used on the original job) so a per-clip reframe/replace gets
-    # the same hero-locked framing as the full run.
-    # Same silence tightening as the full run, so a reframe/replace re-render
-    # ships the same pacing as the original render.
-    plan = tighten.plan_tighten(words_all or [], start, end,
-                                spec.get("safety", "ok"))
-    if plan:
-        tightened = cut_file.replace(".mp4", "_tight.mp4")
-        try:
-            tighten.apply_tighten(cut_file, plan, tightened)
-            cut_file = tightened
-        except Exception as e:
-            plan = []
-            print(f"      ~ tighten skipped ({str(e)[:120]})")
+    # the same hero-locked framing as the full run. `plan` (and `cut_file`) were
+    # already resolved above, before cutting.
     speech = reframe.speech_windows(words_all or [], start, end,
                                     detect.identify_guest(words_all or []))
     if plan and speech:
