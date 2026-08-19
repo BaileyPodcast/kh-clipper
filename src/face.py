@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(_HERE, "assets", "models", "blaze_face_short_range.tflite")
@@ -41,6 +42,16 @@ MIN_TRACK = 0.12          # keep a subject only if seen in >= this fraction of f
 TILE_SEP = 0.25           # medians this far apart (fraction of width) = side-by-side tiles
 
 _detector = None          # module-level cache (loading the model is not free)
+# clipper.py's main loop now renders clips concurrently (ThreadPoolExecutor), and
+# every clip's reframe step can call into analyze() below on its own thread.
+# MediaPipe's Tasks FaceDetector is not documented as safe for concurrent use
+# from multiple threads, so BOTH the lazy creation (a bare `if _detector is
+# None` race could hand two threads two different detector instances, or worse,
+# one thread a half-constructed one) and every `.detect()` call are serialized
+# behind this lock. Frame sampling (ffmpeg) and everything else in analyze()
+# still runs fully in parallel across clips — only the actual detector calls
+# are single-file.
+_detector_lock = threading.Lock()
 
 
 def detector_available():
@@ -49,7 +60,11 @@ def detector_available():
 
 def _get_detector():
     global _detector
-    if _detector is None:
+    if _detector is not None:
+        return _detector
+    with _detector_lock:
+        if _detector is not None:            # double-checked: another thread won the race
+            return _detector
         import mediapipe as mp
         from mediapipe.tasks import python
         from mediapipe.tasks.python import vision
@@ -281,7 +296,11 @@ def analyze(clip_path, guest_windows=None, other_windows=None):
         for fp in frames:
             image = mp.Image.create_from_file(fp)
             width, height = image.width, image.height
-            res = detector.detect(image)
+            # See the module-level comment on _detector_lock: image loading
+            # above stays unlocked (parallel across clips), only the shared
+            # detector's own .detect() call is serialized.
+            with _detector_lock:
+                res = detector.detect(image)
             faces = []
             for d in res.detections:
                 b = d.bounding_box

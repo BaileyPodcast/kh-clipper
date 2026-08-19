@@ -86,6 +86,22 @@ image = (
     .run_commands("cd /root/render && npm ci --omit=dev")
 )
 
+# Perf tuning (kh-clipper stack audit, 2026-08-19): every job function here is
+# CPU-bound (ffmpeg cut/reframe/caption/audiogram, MediaPipe face detection) and
+# none of them requested a CPU size before, so Modal fell back to its small
+# default allotment and every per-clip ffmpeg subprocess competed for a sliver
+# of a core. `cpu=` below is a REQUEST (Modal bills + throttles at that amount,
+# it does not change what os.cpu_count() reports inside the container), sized
+# to give clipper.py's per-clip ThreadPoolExecutor (see clipper.py
+# CLIP_RENDER_WORKERS) real cores to spread across rather than one CPU shared
+# N ways. `min_containers=1` on process_clip_job specifically keeps ONE
+# container warm: it's the interactive reframe/replace path a producer clicks
+# and waits on live, so a cold start (fresh mediapipe/node import) there is the
+# most costly one to eat on every click. The batch `process_job` path is
+# usually kicked off and left, so a cold start costs less there and doesn't
+# get a warm pool (avoids paying for idle containers with no clear win).
+JOB_CPU = 4.0
+
 app = modal.App(APP_NAME)
 SECRET = modal.Secret.from_name("kh-shorts")
 # Cookies live in their own secret so refreshing them is one trivial command and
@@ -492,7 +508,8 @@ def _prepare_supplied_transcript(transcript, ep_id: str, media_path: str = None)
         return None
 
 
-@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
+@app.function(image=image, timeout=1800, cpu=JOB_CPU,
+             secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
 def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
                 guest_name: str = None, transcript: dict = None, moments: list = None,
@@ -610,7 +627,7 @@ def _fetch_audio_window(url, start, end, out_path):
     return out_path
 
 
-@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+@app.function(image=image, timeout=1800, cpu=JOB_CPU, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
 def process_video_job(payload: dict):
     import subprocess
     import sys
@@ -724,7 +741,7 @@ def validate_audiogram_payload(payload):
     return None
 
 
-@app.function(image=image, timeout=1800, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+@app.function(image=image, timeout=1800, cpu=JOB_CPU, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
 def process_audiogram_job(payload: dict):
     import subprocess
     import sys
@@ -833,7 +850,8 @@ def process_audiogram_job(payload: dict):
 # finished job, driving progress through outputs.clips[i].clip_job and NEVER touching
 # the row `status` (it stays 'done' so the results view doesn't collapse).
 # ----------------------------------------------------------------------
-@app.function(image=image, timeout=900, secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
+@app.function(image=image, timeout=900, cpu=JOB_CPU, min_containers=1,
+             secrets=[SECRET, COOKIE_SECRET, XAI_SECRET, ANTHROPIC_SECRET])
 def process_clip_job(action: str, job_id: str, clip_id: str, url: str = None,
                      series: str = None, guest_name: str = None,
                      reframe_mode: str = "speaker", reframe_offset: float = 0.0):
