@@ -727,9 +727,18 @@ def _emotion_bonuses(candidates, audio_path):
         return None
 
 
+def _overlaps_any(start, end, windows):
+    """True when [start,end] shares ANY overlap with any (s,e) in `windows`.
+    Same any-overlap rule worker/app.py's process_clip_job "replace" action
+    already uses to keep a replacement genuinely unused — kept here so a
+    spread run (below) can never hand two type lenses the same transcript
+    moment under two different labels."""
+    return any(not (end <= ws or start >= we) for ws, we in (windows or []))
+
+
 def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
            clip_type="best", reviewer_anchors=None, band_override=None,
-           audio_path=None):
+           audio_path=None, exclude_windows=None):
     """`clip_type` (KH-CTP-001) picks the selection lens from TYPE_PROFILES;
     "best" is bit-identical to the legacy scoring. `reviewer_anchors` is an
     optional list of Episode Reviewer evidence quotes, passed to the Grok
@@ -740,7 +749,11 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
     Shorts behaviour. `audio_path`: optional path to the episode audio (the
     transcription wav); when given, each candidate window earns a small
     audio-emotion bonus (src/emotion.py, capped at EMOTION_BONUS_CAP, a bonus
-    never a gate). None (default) = byte-identical transcript-only scoring."""
+    never a gate). None (default) = byte-identical transcript-only scoring.
+    `exclude_windows` (KH-CTP-001 Phase 2, spread mode): optional list of
+    (start, end) windows to drop from the candidate pool before scoring, so a
+    later type lens in a spread run can never re-surface a moment an earlier
+    lens already claimed. None/empty (default) = byte-identical to before."""
     if clip_type not in TYPE_PROFILES:
         clip_type = "best"                 # unknown type degrades to current behaviour
     data = json.loads(Path(transcript_path).read_text())
@@ -751,6 +764,9 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
         band_override[1][0], band_override[1][1])
     candidates = build_candidates(sentences, guest_speaker,
                                   min_len_sec=min_len, max_len_sec=max_len)
+    if exclude_windows:
+        candidates = [c for c in candidates
+                      if not _overlaps_any(c["start"], c["end"], exclude_windows)]
 
     emo_bonuses = _emotion_bonuses(candidates, audio_path)
     scored = [s for s in (score_candidate(c, clip_type=clip_type, band_override=band_override,
@@ -851,6 +867,119 @@ def detect(transcript_path, use_llm=True, top_n=TOP_N, usage_ctx=None,
     }
 
 
+# ----------------------------------------------------------------------
+# KH-CTP-001 Phase 2: a natural SPREAD across distinct type lenses in one
+# call, instead of N clips of one repeated type. Tony's ask: pick a total
+# count, get a genuine mix of the arc-anchored types, not "best" x N because
+# nobody wants to run the picker five separate times.
+# ----------------------------------------------------------------------
+
+# The default spread order: "best" (the current auto mix) first, then the
+# five arc-anchored types in the order the Kintsugi Journey arc itself runs
+# (golden joinery -> hero today -> fracture -> the wisdom it produced -> the
+# episode in miniature). A caller may pass its own subset/order; this is only
+# the default when none is given.
+DEFAULT_SPREAD_ORDER = ["best", "turning_point", "hero_today", "raw_moment",
+                        "universal_truth", "story_teaser"]
+
+
+def detect_spread(transcript_path, use_llm=True, types=None, usage_ctx=None,
+                  reviewer_anchors=None, audio_path=None):
+    """Run each type in `types` (default DEFAULT_SPREAD_ORDER) as its own
+    ranking lens over the SAME transcript, one genuine top pick per type,
+    excluding any window an earlier type already claimed so the same moment
+    is never returned twice under two labels. A type with no genuine
+    qualifying moment for this episode is simply SKIPPED — never padded,
+    never invented (the Pillar's "never invent facts" rule; see also
+    detect()'s own "shipping what's clean, not padding" note). The trauma-
+    informed guardrails, the safety gate and every per-type ranker/length
+    rule run exactly as they do for a single-type detect() call; this
+    function only decides WHICH lenses run and stitches their real results
+    together.
+
+    Returns the same shape as detect() (so clipper.run()/upload_outputs()
+    need no special-casing), plus:
+      spread_types   the type order actually attempted, in order
+      spread_report  [{"type", "found", "reason"}] per attempted type, so
+                     the caller can report an honest "N of M requested"
+                     instead of silently returning fewer clips than asked.
+    """
+    order = [t for t in (types or DEFAULT_SPREAD_ORDER) if t in TYPE_PROFILES]
+    if not order:
+        order = list(DEFAULT_SPREAD_ORDER)
+    data = json.loads(Path(transcript_path).read_text())
+    ep_id = data.get("id", "clip")
+
+    seen_windows = []
+    clips = []
+    report = []
+    n_candidates = 0
+    n_passed_gate = 0
+    guest_speaker = None
+    grok_used = False
+    llm_errors = []
+    pool_by_window = {}
+
+    for t in order:
+        one = detect(transcript_path, use_llm=use_llm, top_n=1, usage_ctx=usage_ctx,
+                     clip_type=t, reviewer_anchors=reviewer_anchors,
+                     audio_path=audio_path, exclude_windows=seen_windows)
+        n_candidates = max(n_candidates, one.get("n_candidates", 0))
+        n_passed_gate += one.get("n_passed_gate", 0)
+        if guest_speaker is None:
+            guest_speaker = one.get("guest_speaker")
+        if one.get("method") == "grok":
+            grok_used = True
+        if one.get("llm_error"):
+            llm_errors.append(f"{t}: {one['llm_error']}")
+        for cand in one.get("candidate_pool", []):
+            s, e = cand.get("start"), cand.get("end")
+            if s is None or e is None:
+                continue
+            pool_by_window.setdefault((round(float(s), 2), round(float(e), 2)), cand)
+
+        picked = one.get("clips") or []
+        if picked:
+            c = picked[0]
+            seen_windows.append((float(c["start"]), float(c["end"])))
+            clips.append(c)
+            report.append({"type": t, "found": True, "reason": None})
+        else:
+            label = TYPE_PROFILES[t]["label"]
+            reason = (f"no clean moment cleared the gate for {label} in this episode"
+                      if t == "best" else
+                      f"no genuine {label} moment found in this episode")
+            report.append({"type": t, "found": False, "reason": reason})
+
+    for n, clip in enumerate(clips, 1):
+        clip["clip_id"] = f"{ep_id}-{n:02d}"
+        clip["source_video_id"] = ep_id
+
+    n_found = sum(1 for r in report if r["found"])
+    print(f"      spread: {n_found}/{len(order)} requested types produced a genuine "
+          f"clip ({', '.join(t for t in order)})")
+    for r in report:
+        if not r["found"]:
+            print(f"      spread: skipped {r['type']} — {r['reason']}")
+
+    return {
+        "source": ep_id,
+        "title": data.get("title"),
+        "clip_type": "spread",
+        "spread_types": order,
+        "spread_report": report,
+        "method": "grok" if grok_used else "heuristic",
+        "llm_error": "; ".join(llm_errors) if llm_errors else None,
+        "diarized": guest_speaker is not None,
+        "guest_speaker": guest_speaker,
+        "n_candidates": n_candidates,
+        "n_passed_gate": n_passed_gate,
+        "n_requested": len(order),
+        "clips": clips,
+        "candidate_pool": list(pool_by_window.values())[:40],
+    }
+
+
 def _fmt(t):
     m, s = divmod(int(t), 60)
     return f"{m}:{s:02d}"
@@ -859,8 +988,9 @@ def _fmt(t):
 def _print_report(result):
     print(f"\n[detect] {result['title']}")
     if result.get("clip_type") and result["clip_type"] != "best":
-        print(f"[detect] clip type: {result['clip_type']} "
-              f"({TYPE_PROFILES[result['clip_type']]['label']})")
+        profile = TYPE_PROFILES.get(result["clip_type"])
+        label = profile["label"] if profile else result["clip_type"]
+        print(f"[detect] clip type: {result['clip_type']} ({label})")
     if result.get("diarized"):
         print(f"[detect] speaker labelling ON — guest = speaker {result['guest_speaker']} "
               f"(clips built from guest lines only)")
