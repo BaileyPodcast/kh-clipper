@@ -133,10 +133,19 @@ def run(url=None, provider="grok", transcript=None, source=None,
         series=None, source_file=None, episode_id=None,
         progress_cb=None, output_root="output", reframe_mode="speaker",
         guest_name=None, moments=None, usage_ctx=None, caption_style="classic",
-        clip_type="best", reviewer_anchors=None, hook_phrases=None):
+        clip_type="best", reviewer_anchors=None, hook_phrases=None,
+        clip_types=None):
     """Run the pipeline. Returns a structured result dict (see the Studio integration
     spec). `progress_cb(stage, pct, msg)` is called at each stage for live progress;
-    `output_root` roots all written files (use a temp dir from a worker)."""
+    `output_root` roots all written files (use a temp dir from a worker).
+
+    `clip_types` (KH-CTP-001 Phase 2, optional list of 2+ type keys): when
+    given (and `moments` is not), runs a SPREAD instead of `count` clips of
+    one `clip_type` — one genuine top pick per listed type, trimmed to
+    `count` entries, each clip tagged with its own real type. A type with no
+    genuine moment for this episode is skipped, not padded. `clip_type` is
+    ignored in this mode. None (default) = the existing single-type path,
+    byte-identical."""
     def _p(stage, pct, msg=""):
         if progress_cb:
             try:
@@ -190,6 +199,22 @@ def run(url=None, provider="grok", transcript=None, source=None,
         n_ok = sum(1 for c in clips if c.get("safety", "ok") == "ok")
         print(f"      {len(clips)} moment(s) resolved ({n_ok} ok, "
               f"{len(clips) - n_ok} flagged for review)  -> {cpath}")
+    elif clip_types:
+        # KH-CTP-001 Phase 2: a natural spread across distinct type lenses in
+        # one run, trimmed to `count` types, instead of `count` clips of one
+        # repeated type.
+        spread_order = list(clip_types)[:max(1, count)]
+        _p("detect", 35, "finding a spread of Kintsugi moments")
+        print(f"[2/5] Detecting a spread across {len(spread_order)} type(s): "
+              f"{', '.join(spread_order)}"
+              + ("" if use_llm else " (heuristic only)"))
+        result = detect.detect_spread(tpath, use_llm=use_llm, types=spread_order,
+                                      usage_ctx=usage_ctx, reviewer_anchors=reviewer_anchors,
+                                      audio_path=tdata.get("audio_path"))
+        json.dump(result, open(cpath, "w"), indent=2)
+        n_ok = sum(1 for c in result["clips"] if c.get("safety", "ok") == "ok")
+        print(f"      {len(result['clips'])}/{len(spread_order)} requested types produced "
+              f"a clip ({n_ok} ok, {len(result['clips']) - n_ok} flagged for review)  -> {cpath}")
     else:
         # Stage 2, detect (auto-select)
         _p("detect", 35, "finding Kintsugi moments")
@@ -207,6 +232,12 @@ def run(url=None, provider="grok", transcript=None, source=None,
             print(f"      note: only {len(result['clips'])} clean moment(s) cleared the "
                   f"gate (asked for {count}). Shipping what's clean, not padding.")
 
+    # The lens this run actually used: "spread" for a spread run, the exact-cut/
+    # single-type branch's own clip_type otherwise. Read from `result` (both
+    # branches set it) so this never drifts from what detect()/detect_spread()
+    # actually reported.
+    effective_clip_type = result.get("clip_type", clip_type)
+
     # Stage 2.7 — per-clip metadata pack (title/description/hashtags/pinned/banner).
     # Non-fatal: if Grok or the key is unavailable, the videos still cut and the
     # producer fills metadata by hand.
@@ -221,7 +252,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             metadata.generate(result["clips"],
                               result.get("title") or tdata.get("title", ""), ep_url,
                               guest_name=guest_name, series=series, usage_ctx=usage_ctx,
-                              clip_type=clip_type, hook_phrases=hook_phrases)
+                              clip_type=effective_clip_type, hook_phrases=hook_phrases)
             json.dump(result, open(cpath, "w"), indent=2)   # persist metadata
             n_meta = sum(1 for c in result["clips"] if c.get("metadata"))
             print(f"      metadata packs: {n_meta}/{len(result['clips'])} -> {cpath}")
@@ -267,7 +298,8 @@ def run(url=None, provider="grok", transcript=None, source=None,
                 "review_md_path": None, "transcript_path": tpath,
                 "candidate_pool": result.get("candidate_pool", []),
                 "transcript_source": transcript_source, "caption_style": caption_style,
-                "clip_type": clip_type}
+                "clip_type": effective_clip_type,
+                "spread_types": result.get("spread_types"), "spread_report": result.get("spread_report")}
 
     # Per-episode output bundle: <output_root>/final/<id>/ holds clips + REVIEW.md
     ep_id = tdata.get("id") or result.get("source") or "episode"
@@ -431,7 +463,7 @@ def run(url=None, provider="grok", transcript=None, source=None,
             "start": cut_for.get("start", clip.get("start")),
             "end": cut_for.get("end", clip.get("end")),
             "length_sec": cut_for.get("duration", clip.get("length_sec")),
-            "clip_type": clip.get("clip_type", clip_type),   # echoed on every clip (KH-CTP-001)
+            "clip_type": clip.get("clip_type", effective_clip_type),   # echoed on every clip (KH-CTP-001)
             "archetype": clip.get("archetype"),
             "hook_line": clip.get("hook_line"),
             # Selection data for the manifest (locked cross-repo contract):
@@ -460,7 +492,10 @@ def run(url=None, provider="grok", transcript=None, source=None,
         "candidate_pool": result.get("candidate_pool", []),
         "transcript_source": transcript_source,   # reuse_assemblyai | grok_stt | whisperx
         "caption_style": caption_style,      # classic (libass) | kinetic (Remotion, Wave 2)
-        "clip_type": clip_type,              # the selection lens this job ran under (KH-CTP-001)
+        "clip_type": effective_clip_type,    # the selection lens this job ran under (KH-CTP-001);
+                                              # "spread" for a spread run (Phase 2)
+        "spread_types": result.get("spread_types"),     # None outside a spread run
+        "spread_report": result.get("spread_report"),   # [{"type","found","reason"}] or None
     }
 
 

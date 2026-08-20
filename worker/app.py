@@ -420,7 +420,13 @@ def upload_outputs(job_id, result):
             # always fell back to "classic" and a kinetic job's reframe/replace
             # silently re-rendered classic. Persist it so per-clip ops keep the
             # style the job was rendered with.
-            "caption_style": result.get("caption_style", "classic")}
+            "caption_style": result.get("caption_style", "classic"),
+            # KH-CTP-001 Phase 2: a spread run's requested type order + the honest
+            # per-type outcome ([{"type","found","reason"}]) so Studio can show
+            # "N of M requested" instead of a silent short count. None outside a
+            # spread run (single-type/exact-cut jobs are unaffected).
+            "spread_types": result.get("spread_types"),
+            "spread_report": result.get("spread_report")}
 
 
 # ----------------------------------------------------------------------
@@ -514,7 +520,8 @@ def process_job(job_id: str, url: str, series: str = None,
                 count: int = 5, audiogram: bool = True, reframe: str = "speaker",
                 guest_name: str = None, transcript: dict = None, moments: list = None,
                 caption_style: str = "classic", clip_type: str = "best",
-                reviewer_anchors: list = None, hook_phrases: list = None):
+                reviewer_anchors: list = None, hook_phrases: list = None,
+                clip_types: list = None):
     import sys
     sys.path.insert(0, "/root")
     os.chdir("/root")
@@ -548,7 +555,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 reframe_mode=reframe, guest_name=guest_name, transcript=tpath,
                 moments=moments, caption_style=caption_style,
                 clip_type=clip_type, reviewer_anchors=reviewer_anchors,
-                hook_phrases=hook_phrases,
+                hook_phrases=hook_phrases, clip_types=clip_types,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": file_id},
             )
         else:
@@ -559,7 +566,7 @@ def process_job(job_id: str, url: str, series: str = None,
                 guest_name=guest_name, transcript=tpath, moments=moments,
                 caption_style=caption_style,
                 clip_type=clip_type, reviewer_anchors=reviewer_anchors,
-                hook_phrases=hook_phrases,
+                hook_phrases=hook_phrases, clip_types=clip_types,
                 usage_ctx={"job_id": job_id, "source": "worker", "episode_ref": _youtube_id(url)},
             )
         patch_job(job_id, {"stage": "uploading", "progress": 96, "message": "uploading outputs"})
@@ -580,9 +587,22 @@ def process_job(job_id: str, url: str, series: str = None,
             outputs["candidates"] = upload_file(cpath, f"{job_id}/candidates.json")
         except Exception as e:
             print(f"persist transcript/candidates failed (per-clip ops degrade): {e}")
+        # KH-CTP-001 Phase 2: an honest "N of M requested" message on a spread
+        # run whose transcript genuinely didn't have every requested type in
+        # it — never a silent short count. Single-type/exact-cut jobs are
+        # unaffected (spread_types is None, message unchanged).
+        n_clips = len(outputs["clips"])
+        spread_types = outputs.get("spread_types")
+        if spread_types:
+            skipped = [r for r in (outputs.get("spread_report") or []) if not r.get("found")]
+            message = f"{n_clips} of {len(spread_types)} requested clips ready"
+            if skipped:
+                message += " (" + "; ".join(r.get("reason", r["type"]) for r in skipped) + ")"
+        else:
+            message = f"{n_clips} clips ready"
         patch_job(job_id, {"status": "done", "progress": 100, "stage": "done",
                            "episode_id": result.get("episode_id"), "outputs": outputs,
-                           "message": f"{len(outputs['clips'])} clips ready"})
+                           "message": message})
     except (Exception, SystemExit) as e:
         # SystemExit included: it is a BaseException, so a bare `except Exception`
         # let it kill the container without ever writing the job's error, leaving
@@ -1242,6 +1262,25 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         if not isinstance(hook_phrases, list) or not all(isinstance(p, str) for p in hook_phrases):
             raise fastapi.HTTPException(status_code=400, detail="hook_phrases must be a list of strings")
 
+    # KH-CTP-001 Phase 2: an optional SPREAD across multiple type lenses in one
+    # job, instead of `count` clips of one repeated `clip_type`. A list of 2+
+    # distinct type keys, each validated against TYPE_PROFILES the same way
+    # the single clip_type is above (a typo fails fast, not mid-render).
+    # Absent/empty (default) -> the unchanged single-type path, `clip_type`.
+    clip_types = payload.get("clip_types")
+    if clip_types is not None:
+        if not isinstance(clip_types, list) or len(clip_types) < 2:
+            raise fastapi.HTTPException(
+                status_code=400, detail="clip_types must be a list of 2 or more type keys")
+        seen, norm = set(), []
+        for t in clip_types:
+            if not isinstance(t, str) or t not in _detect_mod.TYPE_PROFILES:
+                raise fastapi.HTTPException(status_code=400, detail=f"unknown clip_types entry {t!r}")
+            if t not in seen:
+                seen.add(t)
+                norm.append(t)
+        clip_types = norm
+
     process_job.spawn(
         payload["job_id"], payload["url"], payload.get("series"),
         int(payload.get("count", 5)), bool(payload.get("audiogram", True)),
@@ -1266,5 +1305,7 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         reviewer_anchors,
         # Data-backed hook-phrase directions for the metadata prompt (or None).
         hook_phrases,
+        # KH-CTP-001 Phase 2: the spread type list (or None = single-type path).
+        clip_types,
     )
     return {"accepted": True, "job_id": payload["job_id"]}

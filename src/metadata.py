@@ -120,13 +120,22 @@ angle on the clip, and never a verbatim copy of the captions.
 You return STRICT JSON only."""
 
 
-def _clip_block(i, clip):
+def _clip_block(i, clip, default_clip_type="best"):
+    """`default_clip_type` is the batch-level lens (unchanged behaviour: every
+    clip in a single-type run already carries this same value on its own
+    `clip_type` field). KH-CTP-001 Phase 2 (spread runs): a clip's OWN
+    `clip_type` — genuinely different per clip in a spread batch — always
+    wins when present, so each clip gets the tone hint for the type it was
+    actually selected under, never one hint smeared across a mixed batch."""
     why = clip.get("why") or ""
     safety = clip.get("safety", "ok")
     flag = f"  [SENSITIVE: {safety}]" if safety != "ok" else ""
+    tone = tone_hint_line(clip.get("clip_type") or default_clip_type)
+    tone_block = f"    {tone.strip()}\n" if tone else ""
     return (
         f'[{i}] hook: "{clip.get("hook_line", "")}"\n'
         f"    archetype: {clip.get('archetype', '')}{flag}\n"
+        f"{tone_block}"
         f"    why a listener needs it: {why}\n"
         f"    transcript: {clip.get('text', '')}"
     )
@@ -213,8 +222,11 @@ def generate(clips, episode_title, episode_url, handle=None,
     `guest_name` (when known) is the real guest's name; Grok uses it naturally in
     the title/context/pinned instead of "our guest". `series` is the worker series
     slug, used to build the series-correct hashtags, tags and blurb. `clip_type`
-    (KH-CTP-001) adds a one-line tone hint to the creative slots; "best" adds
-    nothing and the locked packaging scaffolding is never touched either way.
+    (KH-CTP-001) is the batch-level default tone hint; a clip's OWN `clip_type`
+    field wins when present (KH-CTP-001 Phase 2: a spread batch's clips each
+    carry a genuinely different type, so each gets its own tone line, not one
+    hint smeared across the whole batch). "best" adds nothing either way; the
+    locked packaging scaffolding is never touched by any of this.
     `hook_phrases` (optional) are proven phrases mined from KH's own winning
     Shorts, fed to the prompt as phrase DIRECTIONS to remix, never to copy."""
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -231,11 +243,13 @@ def generate(clips, episode_title, episode_url, handle=None,
         if guest_name else
         "The guest's name is not provided, use warm, generic wording (no invented name).\n"
     )
-    blocks = "\n\n".join(_clip_block(i, c) for i, c in enumerate(clips))
+    # Per-clip tone hints (each clip's own clip_type, falling back to the
+    # batch-level default) live INSIDE each clip's block now, not as one line
+    # smeared over the whole batch — see _clip_block's docstring.
+    blocks = "\n\n".join(_clip_block(i, c, default_clip_type=clip_type) for i, c in enumerate(clips))
     user_prompt = (
         f'Episode: "{episode_title}"\n'
         f"{guest_line}"
-        f"{tone_hint_line(clip_type)}"
         f"{hook_phrase_block(hook_phrases)}"
         f"Here are the {len(clips)} clips, each with an [index]:\n\n{blocks}\n\n"
         f'Return JSON exactly like: {{"packs": [{{"index": <int>, '
