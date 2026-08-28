@@ -16,8 +16,11 @@ House voice is the floor: plain Australian English, NO em/en dashes, none of the
 banned words (journey, inspiring, amazing, powerful, resilient).
 """
 
-# Canonical cadence (matches the app; fortnightly is the deliberate later fix).
-CADENCE = "fortnightly"
+# Canonical cadence for the Shorts subscribe line (mirrors kh-studio's
+# SHORTS_CADENCE). Set to "weekly" on Tony's direct instruction (2026-08-28) —
+# Shorts publish more often than the fortnightly long-form episode cadence, so
+# this is deliberately scoped to Shorts only.
+CADENCE = "weekly"
 
 # Verbatim About-KH blurb (skill part 4), em dashes removed.
 ABOUT_KH = (
