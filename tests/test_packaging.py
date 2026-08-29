@@ -125,7 +125,7 @@ def test_description_is_7_part_and_clean():
     assert packaging.ABOUT_KH in d
     assert "About Grit Diaries:" in d
     assert packaging.SERIES["grit-diaries"]["blurb"] in d
-    assert "Subscribe for new episodes fortnightly" in d
+    assert f"Subscribe for new episodes {packaging.CADENCE}" in d
     assert d.strip().endswith("#Shorts #ytshorts #recovery")
     assert not EM_OR_EN_DASH.search(d)
 
