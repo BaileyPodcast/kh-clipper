@@ -520,9 +520,22 @@ def test_optional_fields_must_still_be_the_right_shape():
 def test_optional_fields_may_be_absent():
     app = _load_worker_app()
     p = _payload()
-    for field in ("expected", "no_go_terms", "transcript", "utterances", "episode_id"):
+    # episode_id is deliberately NOT in this list: see test_episode_id_is_required.
+    for field in ("expected", "no_go_terms", "transcript", "utterances"):
         del p[field]
     assert app.validate_episode_qc_payload(p) is None
+
+
+def test_episode_id_is_required():
+    """Required because episode_qc_checks.studio_episode_id is NOT NULL in
+    kh-studio (db/293). Without it every findings POST would be rejected and a
+    real result would surface as a run error, the worst of both outcomes."""
+    app = _load_worker_app()
+    p = _payload()
+    del p["episode_id"]
+    assert app.validate_episode_qc_payload(p) == "missing episode_id"
+    p["episode_id"] = "   "
+    assert app.validate_episode_qc_payload(p) == "missing episode_id"
 
 
 def test_a_checks_subset_is_accepted():

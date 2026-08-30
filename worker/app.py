@@ -906,7 +906,10 @@ def validate_episode_qc_payload(payload):
     import re
     if not isinstance(payload, dict):
         return "payload must be a JSON object"
-    for field in ("job_id", "url"):
+    # episode_id is required, not optional: episode_qc_checks.studio_episode_id
+    # is NOT NULL in kh-studio (db/293), so a findings POST without it would be
+    # rejected wholesale and the run would report an error instead of a result.
+    for field in ("job_id", "url", "episode_id"):
         v = payload.get(field)
         if not isinstance(v, str) or not v.strip():
             return f"missing {field}"
@@ -919,9 +922,6 @@ def validate_episode_qc_payload(payload):
             return ("url must be the Google Drive master, not a YouTube link: QC runs "
                     "on the file about to be published, not on one already published")
         return "url must be a Google Drive file link (the episode master)"
-    episode_id = payload.get("episode_id")
-    if episode_id is not None and (not isinstance(episode_id, str) or not episode_id.strip()):
-        return "episode_id must be a non-empty string"
     if payload.get("expected") is not None and not isinstance(payload["expected"], dict):
         return "expected must be an object"
     terms = payload.get("no_go_terms")
