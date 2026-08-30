@@ -866,6 +866,675 @@ def process_audiogram_job(payload: dict):
 
 
 # ----------------------------------------------------------------------
+# action="episode_qc": mechanical QC on a finished episode master (KH-QC-001).
+# Runs on the Google Drive file that is ABOUT to be published, not on something
+# already live, and writes its findings straight back to Supabase. Progress and
+# the terminal state go to episode_qc_runs, the findings to episode_qc_checks.
+# The worker sends machine facts only; the volunteer-facing wording lives in
+# kh-studio (lib/studio/qc-types.ts) so it can change without a redeploy.
+# ----------------------------------------------------------------------
+QC_RUNS_TABLE = "episode_qc_runs"
+QC_CHECKS_TABLE = "episode_qc_checks"
+
+# Checks that need word-level text. Re-transcribing a 60 minute master is a real
+# per-episode STT charge, so it only happens when one of these is actually in play.
+QC_TRANSCRIPT_CHECKS = {"no_go_topic", "duplicate_segment", "mid_word_cut",
+                        "transcript_mismatch"}
+
+# One duplicated take is worth a finding; forty of them is a wall nobody reads.
+# Past this, the rest are rolled into a single "and N more" line.
+QC_MAX_FINDINGS_PER_CHECK = 25
+
+# Silence is detected from 0.6s (ordinary speech rhythm above that), but only a
+# real hole gets a warning: a conversation about hard things is full of pauses,
+# and flagging every one of them would train people to skim the whole report.
+QC_SILENCE_WARN_SEC = 2.0
+QC_CLIP_PEAK_DB = -0.1           # at or above this is on the ceiling
+QC_AV_START_TOL_SEC = 0.15       # lip sync goes visibly wrong past about this
+QC_AV_DURATION_TOL_SEC = 1.0     # picture and sound should end together
+QC_CAPTIONS_TOL_SEC = 2.0        # captions ending this far off the picture
+QC_DURATION_TOL_PCT = 0.02       # expected-vs-actual runtime slack
+QC_DURATION_TOL_MIN_SEC = 5.0
+
+
+def validate_episode_qc_payload(payload):
+    """Validate an action="episode_qc" payload. Returns None when valid, else a
+    short human-readable reason (the endpoint turns it into a 400). Pure stdlib,
+    same shape as validate_video_payload / validate_audiogram_payload. The
+    `checks` names are validated at the endpoint (they need src/qc.py's
+    CHECK_TYPES), matching the split the other actions already use."""
+    import re
+    if not isinstance(payload, dict):
+        return "payload must be a JSON object"
+    # episode_id is required, not optional: episode_qc_checks.studio_episode_id
+    # is NOT NULL in kh-studio (db/293), so a findings POST without it would be
+    # rejected wholesale and the run would report an error instead of a result.
+    for field in ("job_id", "url", "episode_id"):
+        v = payload.get(field)
+        if not isinstance(v, str) or not v.strip():
+            return f"missing {field}"
+    url = payload["url"].strip()
+    if not _drive_file_id(url):
+        # QC has to run on the file the upload path actually sends to YouTube.
+        # A YouTube link is a different artefact (already published, re-encoded
+        # by YouTube), so a clean result on it would say nothing about the master.
+        if re.search(r"youtu\.?be", url, re.IGNORECASE):
+            return ("url must be the Google Drive master, not a YouTube link: QC runs "
+                    "on the file about to be published, not on one already published")
+        return "url must be a Google Drive file link (the episode master)"
+    if payload.get("expected") is not None and not isinstance(payload["expected"], dict):
+        return "expected must be an object"
+    terms = payload.get("no_go_terms")
+    if terms is not None:
+        if not isinstance(terms, list) or not all(isinstance(t, str) for t in terms):
+            return "no_go_terms must be a list of strings"
+    if payload.get("transcript") is not None and not isinstance(payload["transcript"], dict):
+        return "transcript must be an object"
+    if payload.get("utterances") is not None and not isinstance(payload["utterances"], list):
+        return "utterances must be a list"
+    checks = payload.get("checks")
+    if checks is not None:
+        if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
+            return "checks must be a list of strings"
+    return None
+
+
+def patch_qc_run(run_id, fields):
+    """PATCH an episode_qc_runs row (service role bypasses RLS). Never raises.
+    Columns: status, stage, progress, message, error, source_checksum,
+    source_bytes, media_duration_sec, transcript_source, error_count,
+    warning_count, info_count, finished_at."""
+    import json as _json
+    import requests
+    try:
+        body = _json.dumps(fields, ensure_ascii=True)
+        r = requests.patch(
+            f"{_sb_url()}/rest/v1/{QC_RUNS_TABLE}",
+            headers=_sb_headers({"Content-Type": "application/json",
+                                 "Prefer": "return=minimal"}),
+            params={"id": f"eq.{run_id}"},
+            data=body, timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"patch_qc_run {r.status_code}: {r.text[:200]}")
+    except Exception as e:                       # progress is best-effort
+        print(f"patch_qc_run failed: {e}")
+
+
+def post_qc_findings(rows):
+    """POST the whole findings array to episode_qc_checks in ONE request.
+    Returns True on success.
+
+    Logged rather than raised, like the patch helpers, but the RETURN VALUE is
+    load-bearing: a run that lost its findings and still reported "complete"
+    would show a clean bill of health for an episode nobody actually checked.
+    The caller errors the run instead."""
+    if not rows:
+        return True
+    import json as _json
+    import requests
+    try:
+        r = requests.post(
+            f"{_sb_url()}/rest/v1/{QC_CHECKS_TABLE}",
+            headers=_sb_headers({"Content-Type": "application/json",
+                                 "Prefer": "return=minimal"}),
+            data=_json.dumps(rows, ensure_ascii=True), timeout=120,
+        )
+        if r.status_code >= 300:
+            print(f"post_qc_findings {r.status_code}: {r.text[:300]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"post_qc_findings failed: {e}")
+        return False
+
+
+def _plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+@app.function(image=image, timeout=3600, cpu=JOB_CPU,
+              secrets=[SECRET, COOKIE_SECRET, XAI_SECRET])
+def process_episode_qc_job(payload: dict):
+    import subprocess
+    import sys
+    from datetime import datetime, timezone
+    sys.path.insert(0, "/root")
+    os.chdir("/root")
+
+    job_id = payload.get("job_id")
+    episode_id = payload.get("episode_id")
+    workdir = "/tmp/qcjob"
+    src_path = None
+    audio_path = None
+
+    def prog(stage, pct, msg=""):
+        patch_qc_run(job_id, {"status": "running", "stage": stage,
+                              "progress": int(pct), "message": msg})
+
+    try:
+        # kh-studio has a 45s queued-stall watchdog, so go running immediately.
+        prog("queued", 0, "Starting the QC pass")
+
+        # Defensive re-validation (the endpoint already 400s bad payloads).
+        err = validate_episode_qc_payload(payload)
+        if err:
+            raise RuntimeError(f"invalid job payload: {err}")
+
+        from src import qc, qc_transcript
+
+        expected = payload.get("expected") or {}
+        no_go_terms = payload.get("no_go_terms") or []
+        transcript = payload.get("transcript") or {}
+        utterances = payload.get("utterances") or []
+        wanted = {c for c in (payload.get("checks") or []) if c in qc.CHECK_TYPES}
+
+        findings = []
+        cut_candidates = []
+
+        def runs(check_type):
+            """An absent `checks` list means run everything the inputs allow."""
+            return not wanted or check_type in wanted
+
+        def add(check_type, severity, detail, start=None, end=None):
+            if runs(check_type):
+                findings.append(qc.make_finding(job_id, episode_id, check_type,
+                                                severity, detail, start, end))
+
+        def add_capped(check_type, items, render):
+            """Emit at most QC_MAX_FINDINGS_PER_CHECK findings, then one info row
+            saying how many were not listed. A truncated list that does not say
+            it was truncated is a lie about how clean the episode is."""
+            for item in items[:QC_MAX_FINDINGS_PER_CHECK]:
+                detail, start, end = render(item)
+                add(check_type, "warning", detail, start, end)
+            extra = len(items) - QC_MAX_FINDINGS_PER_CHECK
+            if extra > 0:
+                add(check_type, "info", f"{_plural(extra, 'further finding')} of this "
+                                        f"type, not listed individually")
+
+        # ---- the master itself ---------------------------------------
+        file_id = _drive_file_id(payload["url"])
+        prog("download", 5, "Downloading the master from Google Drive")
+        import gdown
+        os.makedirs(workdir, exist_ok=True)
+        src_path = f"{workdir}/{file_id}.mp4"
+        gdown.download(id=file_id, output=src_path, quiet=True)
+        if not os.path.exists(src_path) or os.path.getsize(src_path) < 10000:
+            raise RuntimeError("Drive download failed. Is the file shared 'anyone with the link'?")
+        source_bytes = os.path.getsize(src_path)
+
+        prog("identity", 10, "Checksumming the file")
+        checksum = qc.md5_file(src_path)
+        if checksum:
+            add("file_identity", "info",
+                f"md5 {checksum}, {source_bytes / (1024 ** 3):.2f} GB")
+        else:
+            add("file_identity", "info", "The file could not be checksummed, so this "
+                                         "result cannot be tied to one exact export")
+
+        # ---- container and streams -----------------------------------
+        prog("probe", 15, "Reading the file's streams")
+        probe = qc.probe_media(src_path)
+        media_duration = probe.get("duration_sec")
+        video, audio = probe.get("video"), probe.get("audio")
+
+        if not probe:
+            add("export_settings", "info", "ffprobe could not read this file, so every "
+                                           "measurement below was skipped")
+        else:
+            parts = []
+            if video:
+                parts.append(f"{video.get('width')}x{video.get('height')} "
+                             f"{video.get('codec')} at {video.get('fps')} fps")
+            if audio:
+                parts.append(f"{audio.get('codec')} {audio.get('sample_rate')} Hz "
+                             f"{audio.get('channels')} ch")
+            parts.append(f"container {probe.get('container')}")
+            summary = ", ".join(str(p) for p in parts)
+            # Only objectively broken exports warn here. There is no committed KH
+            # export standard for this worker to measure against, and inventing
+            # one would produce confident warnings about a correct file.
+            problems = []
+            if not video:
+                problems.append("no video stream")
+            if not audio:
+                problems.append("no audio stream")
+            elif audio.get("sample_rate") and audio["sample_rate"] < 44100:
+                problems.append(f"audio sample rate is {audio['sample_rate']} Hz, "
+                                f"below 44.1 kHz")
+            if problems:
+                add("export_settings", "warning", f"{'; '.join(problems)}. Export: {summary}")
+            else:
+                add("export_settings", "info", f"Export: {summary}")
+
+        # ---- runtime -------------------------------------------------
+        if media_duration is None:
+            add("duration", "info", "The media duration could not be read, so the "
+                                    "runtime was not checked")
+            add("episode_length", "info", "The media duration could not be read, so the "
+                                          "episode length was not checked")
+        else:
+            exp_duration = expected.get("duration_sec")
+            if exp_duration:
+                delta = media_duration - float(exp_duration)
+                tol = max(QC_DURATION_TOL_MIN_SEC,
+                          float(exp_duration) * QC_DURATION_TOL_PCT)
+                if abs(delta) > tol:
+                    add("duration", "warning",
+                        f"The master runs {qc.timecode(media_duration)}, "
+                        f"{delta:+.0f}s against the expected {qc.timecode(exp_duration)}")
+                else:
+                    add("duration", "info",
+                        f"The master runs {qc.timecode(media_duration)}, within "
+                        f"{delta:+.0f}s of expected")
+            else:
+                add("duration", "info", f"The master runs {qc.timecode(media_duration)}. "
+                                        f"No expected duration was supplied, so nothing "
+                                        f"was compared")
+            low, high = expected.get("length_min_sec"), expected.get("length_max_sec")
+            if low is None and high is None:
+                add("episode_length", "info", "No length range was supplied, so the "
+                                              "episode length was not checked")
+            elif low is not None and media_duration < float(low):
+                add("episode_length", "warning",
+                    f"{qc.timecode(media_duration)} is shorter than the "
+                    f"{qc.timecode(low)} minimum for an episode")
+            elif high is not None and media_duration > float(high):
+                add("episode_length", "warning",
+                    f"{qc.timecode(media_duration)} is longer than the "
+                    f"{qc.timecode(high)} maximum for an episode")
+            else:
+                add("episode_length", "info",
+                    f"{qc.timecode(media_duration)} sits inside the expected range")
+
+        # ---- picture -------------------------------------------------
+        if runs("black_frame"):
+            prog("video", 25, "Looking for black frames")
+            ok, _, stderr = qc.run_capture(qc.build_blackdetect_command(src_path))
+            blacks = qc.parse_blackdetect(stderr)
+            cut_candidates.extend([t for pair in blacks for t in pair])
+            if not ok:
+                add("black_frame", "info", "ffmpeg could not scan this file for black "
+                                           "frames, so it was not checked")
+            elif not blacks:
+                add("black_frame", "info", f"No black run of {qc.BLACK_MIN_DUR}s or "
+                                           f"longer was found")
+            else:
+                add_capped("black_frame", blacks, lambda b: (
+                    f"{b[1] - b[0]:.1f}s of black at {qc.timecode(b[0])}", b[0], b[1]))
+
+        if runs("freeze_frame"):
+            prog("video", 35, "Looking for frozen picture")
+            ok, _, stderr = qc.run_capture(qc.build_freezedetect_command(src_path))
+            freezes = qc.parse_freezedetect(stderr)
+            cut_candidates.extend([t for pair in freezes for t in pair if t is not None])
+            if not ok:
+                add("freeze_frame", "info", "ffmpeg could not scan this file for frozen "
+                                            "picture, so it was not checked")
+            elif not freezes:
+                add("freeze_frame", "info", f"No frozen picture of {qc.FREEZE_MIN_DUR}s "
+                                            f"or longer was found")
+            else:
+                add_capped("freeze_frame", freezes, lambda f: (
+                    (f"Picture frozen from {qc.timecode(f[0])} to the end of the file"
+                     if f[1] is None else
+                     f"{f[1] - f[0]:.1f}s of frozen picture at {qc.timecode(f[0])}"),
+                    f[0], f[1]))
+
+        if runs("resolution"):
+            prog("video", 45, "Sampling the picture size across the episode")
+            if not probe:
+                add("resolution", "info", "The file could not be probed, so picture size "
+                                          "changes were not checked")
+            else:
+                changes = qc.detect_resolution_changes(src_path, duration_sec=media_duration)
+                if changes:
+                    add_capped("resolution", changes, lambda c: (
+                        f"Picture is {c['width']}x{c['height']} at {c['fps']} fps at "
+                        f"{qc.timecode(c['time'])}, against {c['baseline_width']}x"
+                        f"{c['baseline_height']} at {c['baseline_fps']} fps earlier",
+                        c["time"], None))
+                elif video:
+                    add("resolution", "info",
+                        f"Picture stayed {video.get('width')}x{video.get('height')} "
+                        f"across the sampled points")
+                else:
+                    add("resolution", "info", "This file has no video stream to sample")
+
+        # ---- sound ---------------------------------------------------
+        if runs("silence_gap"):
+            prog("audio", 55, "Listening for dead air")
+            ok, _, stderr = qc.run_capture(qc.build_silencedetect_command(src_path))
+            silences = qc.parse_silencedetect(stderr)
+            if not ok:
+                add("silence_gap", "info", "ffmpeg could not scan this file for silence, "
+                                           "so it was not checked")
+            else:
+                long_gaps = [(s, e) for s, e in silences
+                             if e is not None and e - s >= QC_SILENCE_WARN_SEC]
+                short = len(silences) - len(long_gaps)
+                if long_gaps:
+                    add_capped("silence_gap", long_gaps, lambda g: (
+                        f"{g[1] - g[0]:.1f}s of near-silence at {qc.timecode(g[0])}",
+                        g[0], g[1]))
+                else:
+                    add("silence_gap", "info", f"No silence of {QC_SILENCE_WARN_SEC}s or "
+                                               f"longer was found")
+                if short > 0:
+                    add("silence_gap", "info",
+                        f"{_plural(short, 'shorter pause')} under {QC_SILENCE_WARN_SEC}s "
+                        f"measured and not flagged, since a held pause is part of how "
+                        f"these conversations sound")
+
+        if runs("loudness"):
+            prog("audio", 62, "Measuring loudness")
+            ok, _, stderr = qc.run_capture(qc.build_ebur128_command(src_path))
+            measured = qc.parse_ebur128(stderr)
+            integrated = measured.get("integrated_lufs")
+            true_peak = measured.get("true_peak_dbtp")
+            if not ok or integrated is None:
+                add("loudness", "info", "Loudness could not be measured on this file, so "
+                                        "it was not checked")
+            else:
+                target = expected.get("loudness_lufs")
+                tolerance = float(expected.get("loudness_tolerance") or 2.0)
+                reading = (f"{integrated:.1f} LUFS integrated, true peak "
+                           f"{true_peak if true_peak is None else round(true_peak, 1)} dBTP, "
+                           f"LRA {measured.get('lra')} LU")
+                if target is None:
+                    add("loudness", "info", f"Measured {reading}. No target was supplied, "
+                                            f"so nothing was compared")
+                elif abs(integrated - float(target)) > tolerance:
+                    add("loudness", "warning",
+                        f"Measured {reading}, against a target of {float(target):.1f} LUFS "
+                        f"plus or minus {tolerance:.1f}")
+                else:
+                    add("loudness", "info", f"Measured {reading}, inside the "
+                                            f"{float(target):.1f} LUFS target")
+                ceiling = expected.get("true_peak_dbtp")
+                if true_peak is not None and ceiling is not None and true_peak > float(ceiling):
+                    add("loudness", "warning",
+                        f"True peak is {true_peak:.1f} dBTP, over the "
+                        f"{float(ceiling):.1f} dBTP ceiling")
+
+        if runs("clipping"):
+            prog("audio", 68, "Checking for clipping")
+            ok, _, stderr = qc.run_capture(qc.build_astats_command(src_path))
+            stats = qc.parse_astats(stderr)
+            peak = stats.get("peak_level_db")
+            if not ok or peak is None:
+                add("clipping", "info", "The sample peak could not be measured, so "
+                                        "clipping was not checked")
+            elif peak >= QC_CLIP_PEAK_DB:
+                add("clipping", "warning",
+                    f"Sample peak is {peak:.2f} dBFS, sitting on the ceiling "
+                    f"({stats.get('peak_count')} samples at peak)")
+            else:
+                add("clipping", "info", f"Sample peak is {peak:.2f} dBFS, clear of the "
+                                        f"ceiling")
+
+        if runs("av_sync"):
+            drift = qc.av_sync_drift(src_path, probe=probe)
+            if not drift:
+                add("av_sync", "info", "The video and audio stream timings could not both "
+                                       "be read, so A/V sync was not checked")
+            else:
+                offset = drift.get("start_offset_sec")
+                delta = drift.get("duration_delta_sec")
+                problems = []
+                if offset is not None and abs(offset) > QC_AV_START_TOL_SEC:
+                    problems.append(f"picture starts {offset:+.3f}s from the audio")
+                if delta is not None and abs(delta) > QC_AV_DURATION_TOL_SEC:
+                    problems.append(f"picture runs {delta:+.2f}s against the audio")
+                if problems:
+                    add("av_sync", "warning", "; ".join(problems))
+                else:
+                    add("av_sync", "info", f"Picture and audio start within "
+                                           f"{QC_AV_START_TOL_SEC}s and end together")
+
+        # ---- the transcript ------------------------------------------
+        prog("transcript", 75, "Checking the transcript against the master")
+        words = transcript.get("words") or []
+        transcript_source = "none"
+        needs_transcript = (not wanted) or bool(wanted & QC_TRANSCRIPT_CHECKS)
+
+        def _retranscribe():
+            """Re-transcribe the master when the stored transcript belongs to a
+            different edit. This is a real STT charge per episode, so it only
+            runs when a transcript-dependent check is actually in play, and any
+            failure degrades to 'none' with an honest note rather than to a
+            transcript that does not match the file."""
+            nonlocal audio_path
+            if not os.environ.get("XAI_API_KEY"):
+                add("transcript_mismatch", "info", "No transcription key is set on the "
+                                                   "worker, so the transcript checks did "
+                                                   "not run")
+                return [], "none"
+            prog("transcribe", 78, "Re-transcribing the master")
+            audio_path = f"{workdir}/qc_audio.wav"
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-nostdin", "-i", src_path, "-vn", "-ac", "1",
+                 "-ar", "16000", audio_path], capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.exists(audio_path):
+                add("transcript_mismatch", "info", "Audio could not be extracted for "
+                                                   "re-transcription, so the transcript "
+                                                   "checks did not run")
+                return [], "none"
+            from src import transcribe as stt
+            try:
+                out = stt.transcribe(
+                    audio_path, provider="grok",
+                    usage_ctx={"job_id": job_id, "source": "worker-qc",
+                               "episode_ref": episode_id or file_id})
+            except Exception as e:
+                add("transcript_mismatch", "info",
+                    f"Re-transcribing the master failed ({str(e)[:160]}), so the "
+                    f"transcript checks did not run")
+                return [], "none"
+            return out.get("words") or [], "re_transcribed"
+
+        if words and qc_transcript.transcript_fits_media(words, media_duration):
+            transcript_source = "stored"
+            if media_duration is None:
+                add("transcript_mismatch", "info",
+                    "The media duration could not be read, so the stored transcript was "
+                    "used without being checked against the file")
+            else:
+                add("transcript_mismatch", "info",
+                    f"The stored transcript ends at "
+                    f"{qc.timecode(qc_transcript.last_word_end(words))} and fits this "
+                    f"{qc.timecode(media_duration)} master")
+        elif words:
+            add("transcript_mismatch", "warning",
+                f"The stored transcript ends at "
+                f"{qc.timecode(qc_transcript.last_word_end(words))} but the master runs "
+                f"{qc.timecode(media_duration)}, so it belongs to a different edit")
+            if needs_transcript:
+                words, transcript_source = _retranscribe()
+                # Diarised turns came from the stored transcript's edit, so they
+                # no longer describe this file.
+                utterances = []
+        elif needs_transcript:
+            add("transcript_mismatch", "info", "No stored transcript was supplied with "
+                                               "this run")
+            words, transcript_source = _retranscribe()
+
+        # ---- consent: the one check that blocks a publish -------------
+        if runs("no_go_topic"):
+            prog("consent", 85, "Scanning for no-go topics")
+            if not no_go_terms:
+                add("no_go_topic", "info", "No no-go terms are recorded for this hero, so "
+                                           "nothing was scanned for")
+            elif not words:
+                add("no_go_topic", "info", "No transcript was available for this master, "
+                                           "so the no-go topic scan did not run")
+            else:
+                hits = qc_transcript.no_go_hits(words, no_go_terms)
+                if not hits:
+                    add("no_go_topic", "info",
+                        f"Scanned {len(words)} words against "
+                        f"{_plural(len(no_go_terms), 'no-go term')} with no match")
+                else:
+                    for hit in hits[:QC_MAX_FINDINGS_PER_CHECK]:
+                        add("no_go_topic", "error",
+                            f"A no-go topic is spoken at {qc.timecode(hit['start'])}: "
+                            f"\"{hit['text'][:120]}\"", hit["start"], hit["end"])
+                    extra = len(hits) - QC_MAX_FINDINGS_PER_CHECK
+                    if extra > 0:
+                        add("no_go_topic", "error",
+                            f"{_plural(extra, 'further no-go match')} found, not listed "
+                            f"individually")
+
+        # ---- edit quality --------------------------------------------
+        if runs("mid_word_cut"):
+            explicit = [c for c in (payload.get("cut_points") or [])
+                        if isinstance(c, (int, float)) and not isinstance(c, bool)]
+            # Without an edit decision list, the only cut points the worker can
+            # actually see are the visible splice markers: the edges of a black
+            # run or a freeze. Silence edges are deliberately excluded, since a
+            # cut in silence is a clean cut by definition.
+            points = explicit or sorted(set(cut_candidates))
+            if not words:
+                add("mid_word_cut", "info", "No transcript was available for this master, "
+                                            "so cut points were not checked")
+            elif not points:
+                add("mid_word_cut", "info", "No cut points were supplied or detected in "
+                                            "this master, so nothing was checked")
+            else:
+                cuts = qc_transcript.mid_word_cuts(words, points)
+                if cuts:
+                    add_capped("mid_word_cut", cuts, lambda c: (
+                        f"A cut at {qc.timecode(c['time'])} lands inside the word "
+                        f"\"{c['word']}\"", c["start"], c["end"]))
+                else:
+                    add("mid_word_cut", "info",
+                        f"Checked {_plural(len(points), 'cut point')}, none land inside "
+                        f"a word")
+
+        if runs("duplicate_segment"):
+            if not words:
+                add("duplicate_segment", "info", "No transcript was available for this "
+                                                 "master, so repeated takes were not "
+                                                 "checked")
+            else:
+                dups = qc_transcript.duplicate_segments(words)
+                if dups:
+                    add_capped("duplicate_segment", dups, lambda d: (
+                        f"\"{d['phrase'][:120]}\" is said at "
+                        f"{qc.timecode(d['first_start'])} and again at "
+                        f"{qc.timecode(d['second_start'])}",
+                        d["second_start"], d["second_end"]))
+                else:
+                    add("duplicate_segment", "info", "No phrase of six or more words "
+                                                     "repeats inside the search window")
+
+        # ---- who is in the room, and the episode's shape --------------
+        if runs("speaker_count"):
+            if not utterances:
+                add("speaker_count", "info", "No diarised turns were supplied for this "
+                                             "master, so the speaker count was not checked")
+            else:
+                speakers = qc_transcript.speaker_count(utterances)
+                expected_speakers = expected.get("speakers")
+                if expected_speakers is None:
+                    add("speaker_count", "info", f"{_plural(speakers, 'distinct speaker')} "
+                                                 f"across the episode. No expected count "
+                                                 f"was supplied")
+                elif speakers != int(expected_speakers):
+                    add("speaker_count", "warning",
+                        f"{_plural(speakers, 'distinct speaker')} across the episode, "
+                        f"against {int(expected_speakers)} expected")
+                else:
+                    add("speaker_count", "info",
+                        f"{_plural(speakers, 'distinct speaker')}, as expected")
+
+        if runs("segment_order"):
+            if not utterances:
+                add("segment_order", "info", "No diarised turns were supplied for this "
+                                             "master, so the episode shape was not checked")
+            else:
+                shape = qc_transcript.segment_order(utterances)
+                notes = []
+                if shape["missing"]:
+                    notes.append("did not find " + ", ".join(shape["missing"]))
+                notes.extend(shape["out_of_order"])
+                # Keyword heuristic, and it says so: a host who words the advisory
+                # differently reads as missing, which is a prompt to look, not a fault.
+                if notes:
+                    add("segment_order", "warning",
+                        f"Keyword check of the KH episode shape: {'; '.join(notes)}. This "
+                        f"is a heuristic over {shape['turns']} turns, not a verdict")
+                else:
+                    add("segment_order", "info",
+                        f"Hook, branded intro, content advisory, main conversation and "
+                        f"outro all appear in order across {shape['turns']} turns, by "
+                        f"keyword match")
+
+        # ---- captions -------------------------------------------------
+        if runs("captions_sync"):
+            captions_duration = expected.get("captions_duration_sec")
+            if captions_duration is None:
+                add("captions_sync", "info", "No caption duration was supplied, so the "
+                                             "captions were not checked against the file")
+            elif media_duration is None:
+                add("captions_sync", "info", "The media duration could not be read, so the "
+                                             "captions were not checked against the file")
+            else:
+                delta = float(captions_duration) - media_duration
+                if abs(delta) > QC_CAPTIONS_TOL_SEC:
+                    add("captions_sync", "warning",
+                        f"The captions end at {qc.timecode(captions_duration)}, "
+                        f"{delta:+.1f}s from the {qc.timecode(media_duration)} master")
+                else:
+                    add("captions_sync", "info",
+                        f"The captions end within {abs(delta):.1f}s of the master")
+
+        # ---- write it all back ----------------------------------------
+        prog("writing", 95, "Saving the findings")
+        counts = {"error": 0, "warning": 0, "info": 0}
+        for f in findings:
+            counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+        if not post_qc_findings(findings):
+            raise RuntimeError("The QC findings could not be saved to episode_qc_checks, "
+                               "so this run has no result")
+
+        if counts["error"]:
+            message = (f"{_plural(counts['error'], 'blocking issue')}, "
+                       f"{_plural(counts['warning'], 'warning')}")
+        elif counts["warning"]:
+            message = f"{_plural(counts['warning'], 'warning')}, nothing blocking"
+        else:
+            message = "Nothing flagged"
+
+        patch_qc_run(job_id, {
+            "status": "complete", "stage": "done", "progress": 100,
+            "source_checksum": checksum, "source_bytes": source_bytes,
+            "media_duration_sec": round(media_duration, 2) if media_duration else None,
+            "transcript_source": transcript_source,
+            "error_count": counts["error"], "warning_count": counts["warning"],
+            "info_count": counts["info"], "message": message,
+            "finished_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    except (Exception, SystemExit) as e:
+        # SystemExit included: it is a BaseException, so a bare `except Exception`
+        # lets Modal kill the container without ever writing the run's error,
+        # leaving it stuck on 'running' until a watchdog expires it. That bug
+        # already happened once in process_job.
+        patch_qc_run(job_id, {"status": "error", "error": str(e)[:500] or "worker exited"})
+        raise
+    finally:
+        # The master is hero content under a signed release. It never stays on
+        # the container after the pass, whether the pass worked or not.
+        for path in (src_path, audio_path):
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                print(f"qc cleanup failed for {path}: {e}")
+
+
+# ----------------------------------------------------------------------
 # Per-clip op: the kh-studio "reframe" / "replace" buttons. Re-render ONE clip of a
 # finished job, driving progress through outputs.clips[i].clip_job and NEVER touching
 # the row `status` (it stays 'done' so the results view doesn't collapse).
@@ -1206,6 +1875,26 @@ def generate(payload: dict, authorization: str = fastapi.Header(default="")):
         if clip_type not in _detect_mod3.TYPE_PROFILES:
             raise fastapi.HTTPException(status_code=400, detail=f"unknown clip_type {clip_type!r}")
         process_audiogram_job.spawn(payload)
+        return {"accepted": True, "job_id": payload["job_id"], "action": _action}
+
+    # Mechanical QC on a finished episode master (KH-QC-001, action="episode_qc").
+    # Placed BEFORE the fall-through unknown-action 400 below. Check names are
+    # validated here (they need src/qc.py's CHECK_TYPES), the rest in
+    # validate_episode_qc_payload, the same split the other actions use.
+    if _action == "episode_qc":
+        err = validate_episode_qc_payload(payload)
+        if err:
+            raise fastapi.HTTPException(status_code=400, detail=err)
+        requested = payload.get("checks") or []
+        if requested:
+            import sys as _sys4
+            _sys4.path.insert(0, "/root")
+            from src import qc as _qc_mod
+            unknown = [c for c in requested if c not in _qc_mod.CHECK_TYPES]
+            if unknown:
+                raise fastapi.HTTPException(status_code=400,
+                                            detail=f"unknown check {unknown[0]!r}")
+        process_episode_qc_job.spawn(payload)
         return {"accepted": True, "job_id": payload["job_id"], "action": _action}
 
     # Per-clip ops share this endpoint, distinguished by `action`. An absent `action`
