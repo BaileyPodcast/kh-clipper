@@ -961,32 +961,47 @@ def patch_qc_run(run_id, fields):
         print(f"patch_qc_run failed: {e}")
 
 
-def post_qc_findings(rows):
-    """POST the whole findings array to episode_qc_checks in ONE request.
-    Returns True on success.
+# Findings go up in batches rather than one giant array. A long episode can
+# produce a lot of rows, and a single request big enough to be rejected or time
+# out would lose the whole run's result over a size limit nobody would think to
+# look for.
+QC_FINDINGS_BATCH = 250
 
-    Logged rather than raised, like the patch helpers, but the RETURN VALUE is
-    load-bearing: a run that lost its findings and still reported "complete"
-    would show a clean bill of health for an episode nobody actually checked.
-    The caller errors the run instead."""
+
+def post_qc_findings(rows):
+    """POST the findings to episode_qc_checks. Returns (ok, reason).
+
+    The REASON is load-bearing, not decoration. The first real run of this
+    worker failed here and reported only "the findings could not be saved",
+    which is true, useless, and cost a full re-run to learn nothing. Whatever
+    PostgREST says goes back onto the run so the next person reads the actual
+    cause instead of guessing at it.
+
+    A run that lost its findings must never report "complete": that would show
+    a clean bill of health for an episode nobody actually checked. The caller
+    errors the run instead."""
     if not rows:
-        return True
+        return True, None
     import json as _json
     import requests
-    try:
-        r = requests.post(
-            f"{_sb_url()}/rest/v1/{QC_CHECKS_TABLE}",
-            headers=_sb_headers({"Content-Type": "application/json",
-                                 "Prefer": "return=minimal"}),
-            data=_json.dumps(rows, ensure_ascii=True), timeout=120,
-        )
-        if r.status_code >= 300:
-            print(f"post_qc_findings {r.status_code}: {r.text[:300]}")
-            return False
-        return True
-    except Exception as e:
-        print(f"post_qc_findings failed: {e}")
-        return False
+    for i in range(0, len(rows), QC_FINDINGS_BATCH):
+        batch = rows[i:i + QC_FINDINGS_BATCH]
+        try:
+            r = requests.post(
+                f"{_sb_url()}/rest/v1/{QC_CHECKS_TABLE}",
+                headers=_sb_headers({"Content-Type": "application/json",
+                                     "Prefer": "return=minimal"}),
+                data=_json.dumps(batch, ensure_ascii=True), timeout=120,
+            )
+            if r.status_code >= 300:
+                reason = f"HTTP {r.status_code}: {(r.text or '').strip()[:400]}"
+                print(f"post_qc_findings {reason}")
+                return False, reason
+        except Exception as e:
+            reason = f"{type(e).__name__}: {str(e)[:300]}"
+            print(f"post_qc_findings failed: {reason}")
+            return False, reason
+    return True, None
 
 
 def _plural(n, word):
@@ -1495,9 +1510,11 @@ def process_episode_qc_job(payload: dict):
         counts = {"error": 0, "warning": 0, "info": 0}
         for f in findings:
             counts[f["severity"]] = counts.get(f["severity"], 0) + 1
-        if not post_qc_findings(findings):
-            raise RuntimeError("The QC findings could not be saved to episode_qc_checks, "
-                               "so this run has no result")
+        saved, why = post_qc_findings(findings)
+        if not saved:
+            raise RuntimeError(
+                f"The {len(findings)} findings could not be saved, so this run has no "
+                f"result. The database said: {why}")
 
         if counts["error"]:
             message = (f"{_plural(counts['error'], 'blocking issue')}, "
