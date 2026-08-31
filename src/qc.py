@@ -84,19 +84,22 @@ def make_finding(run_id, episode_id, check_type, severity, detail,
     severity = str(severity)
     if check_type == "no_go_topic" and severity != "info":
         severity = "error"
+    # EVERY key is present on EVERY row, with None where a value is absent.
+    # PostgREST rejects a bulk insert whose objects have differing key sets
+    # (PGRST102, "All object keys must match"), so omitting timestamp_start on
+    # the findings that have no timestamp failed the WHOLE batch. The first two
+    # real runs died here with 55 findings each, and reported nothing about the
+    # episode as a result. Absent means null, never missing.
     row = {
         "run_id": run_id,
+        "studio_episode_id": episode_id or None,
         "check_type": check_type,
         "severity": severity,
         "confidence": CONFIDENCE.get(check_type, 0.5),
         "detail": str(detail)[:1000],
+        "timestamp_start": None if start is None else round(float(start), 2),
+        "timestamp_end": None if end is None else round(float(end), 2),
     }
-    if episode_id:
-        row["studio_episode_id"] = episode_id
-    if start is not None:
-        row["timestamp_start"] = round(float(start), 2)
-    if end is not None:
-        row["timestamp_end"] = round(float(end), 2)
     return row
 
 
