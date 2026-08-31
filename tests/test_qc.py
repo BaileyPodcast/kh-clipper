@@ -421,10 +421,15 @@ def test_finding_carries_the_run_and_episode_and_rounded_timestamps():
     assert row["severity"] == "warning"
 
 
-def test_finding_omits_the_episode_id_when_there_is_none():
+def test_finding_nulls_absent_values_rather_than_omitting_them():
+    """This test used to assert the opposite, and the opposite was the bug:
+    omitting a key makes the row's key set differ from its neighbours', and
+    PostgREST rejects the whole bulk insert with PGRST102. Two real runs lost
+    55 findings each to it. Absent is null; the key always stays."""
     row = qc.make_finding("run-1", None, "duration", "info", "x")
-    assert "studio_episode_id" not in row
-    assert "timestamp_start" not in row
+    assert row["studio_episode_id"] is None
+    assert row["timestamp_start"] is None
+    assert row["timestamp_end"] is None
 
 
 def test_timecode_reads_like_a_scrub_position():
@@ -556,3 +561,35 @@ def test_every_check_the_worker_advertises_has_a_confidence():
     # type without a confidence would reach the UI as a bare 0.5 default.
     assert app.QC_TRANSCRIPT_CHECKS <= qc.CHECK_TYPES
     assert qc.CHECK_TYPES == set(qc.CONFIDENCE)
+
+
+def test_every_finding_carries_the_same_keys():
+    """PostgREST rejects a bulk insert whose objects have differing key sets
+    (PGRST102, "All object keys must match"). Two real runs died at the write
+    step with 55 findings each because rows without a timestamp omitted the
+    key instead of sending null. Absent must mean null, never missing."""
+    from src import qc
+
+    rows = [
+        qc.make_finding("run", "ep", "black_frame", "warning", "with times", start=1.0, end=2.0),
+        qc.make_finding("run", "ep", "loudness", "warning", "no times"),
+        qc.make_finding("run", "ep", "silence_gap", "info", "start only", start=3.0),
+    ]
+    keys = {frozenset(r) for r in rows}
+    assert len(keys) == 1, f"key sets differ: {keys}"
+
+    absent = rows[1]
+    assert absent["timestamp_start"] is None and absent["timestamp_end"] is None
+    assert rows[2]["timestamp_end"] is None
+    assert rows[0]["timestamp_start"] == 1.0
+
+
+def test_missing_episode_id_is_null_not_absent():
+    """Same rule: the key stays, the value goes null. studio_episode_id is NOT
+    NULL in kh-studio so this row would still be rejected, but by the column
+    constraint that means it, not by a key-set mismatch that takes the whole
+    batch down with it."""
+    from src import qc
+
+    row = qc.make_finding("run", None, "loudness", "warning", "no episode")
+    assert "studio_episode_id" in row and row["studio_episode_id"] is None
