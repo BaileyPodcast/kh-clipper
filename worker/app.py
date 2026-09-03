@@ -33,6 +33,7 @@ The action="video" landscape audiogram job writes to a second private bucket,
 `studio-video`, and streams progress into `studio_video_jobs` (KH-VRL-001).
 """
 import os
+import re
 
 import fastapi          # provided by Modal's client for web endpoints
 import modal
@@ -616,6 +617,48 @@ def process_job(job_id: str, url: str, series: str = None,
 # (KH-VRL-001 Wave 1). Drives progress through studio_video_jobs and uploads to
 # the `studio-video` bucket. Audio only: no 1080p video fetch, no 35s clip cap.
 # ----------------------------------------------------------------------
+def master_source_kind(url):
+    """Classify a master_url for process_youtube_upload: 'drive' for a Google Drive
+    file link (gdown), 'https' for any other https URL (a signed Supabase Storage
+    URL for a master uploaded from the producer's computer), None otherwise. Pure."""
+    u = (url or "").strip()
+    if _drive_file_id(u):
+        return "drive"
+    if u.lower().startswith("https://"):
+        return "https"
+    return None
+
+
+def _master_extension(file_name):
+    """File extension for the local copy of an uploaded master, from its original
+    name; mp4 when unknown. Letters/digits only so a name can never form a path."""
+    ext = ((file_name or "").rsplit(".", 1)[-1] if "." in (file_name or "") else "").lower()
+    return ext if re.fullmatch(r"[a-z0-9]{2,5}", ext or "") else "mp4"
+
+
+def _download_https_stream(url, dst, on_progress=None, chunk=8 * 1024 * 1024):
+    """Stream an https URL to disk. 8 MB chunks keep memory flat on a multi-GB
+    master; on_progress gets 0-100 when the server sends Content-Length."""
+    import requests
+    with requests.get(url, stream=True, timeout=(30, 300)) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        last = -1
+        with open(dst, "wb") as f:
+            for part in r.iter_content(chunk_size=chunk):
+                if not part:
+                    continue
+                f.write(part)
+                done += len(part)
+                if total and on_progress:
+                    pct = int(done * 100 / total)
+                    if pct != last and pct % 10 == 0:
+                        last = pct
+                        on_progress(pct)
+    return dst
+
+
 def _drive_file_id(url):
     """Google Drive file id from a Drive link, or None (same regex as process_job)."""
     import re
@@ -1732,18 +1775,32 @@ def process_youtube_upload(payload: dict):
         patch_upload(upload_id, {"state": "uploading", "stage": "queued",
                                  "progress": 0, "error": None})
 
-        # 1) Fetch the Drive master (same gdown path as the Shorts worker).
-        drive = re.search(r"drive\.google\.com/(?:file/d/|open\?id=|uc\?id=|.*[?&]id=)([A-Za-z0-9_-]{20,})", master_url)
-        if not drive:
-            raise RuntimeError("master_url is not a Google Drive file link.")
-        file_id = drive.group(1)
-        prog("download", 5, "downloading master from Google Drive")
-        import gdown
+        # 1) Fetch the master. Two sources (kh-studio db/300, 2026-09-03):
+        #    - a Google Drive link (the original path, gdown), or
+        #    - a file the producer uploaded from their own computer into the
+        #      private studio-video bucket, which kh-studio signs and sends as
+        #      a plain HTTPS URL. Streamed to disk in chunks, never held in
+        #      memory, because a master is often several GB.
         os.makedirs("/tmp/yt", exist_ok=True)
-        src = f"/tmp/yt/{file_id}.mp4"
-        gdown.download(id=file_id, output=src, quiet=True)
-        if not os.path.exists(src) or os.path.getsize(src) < 10000:
-            raise RuntimeError("Drive download failed — is the file shared 'anyone with the link'?")
+        kind = master_source_kind(master_url)
+        if kind == "drive":
+            file_id = _drive_file_id(master_url)
+            prog("download", 5, "downloading master from Google Drive")
+            import gdown
+            src = f"/tmp/yt/{file_id}.mp4"
+            gdown.download(id=file_id, output=src, quiet=True)
+            if not os.path.exists(src) or os.path.getsize(src) < 10000:
+                raise RuntimeError("Drive download failed — is the file shared 'anyone with the link'?")
+        elif kind == "https":
+            prog("download", 5, "downloading the uploaded master")
+            src = f"/tmp/yt/{upload_id}.{_master_extension(payload.get('master_file_name'))}"
+            _download_https_stream(master_url, src,
+                                   on_progress=lambda pct: prog("download", 5 + int(pct * 0.05),
+                                                                f"downloading the uploaded master ({int(pct)}%)"))
+            if not os.path.exists(src) or os.path.getsize(src) < 10000:
+                raise RuntimeError("The uploaded master could not be fetched from storage (empty download).")
+        else:
+            raise RuntimeError("master_url is neither a Google Drive file link nor an https URL.")
 
         # 2) Authorise (worker mints its own token from the stored refresh token).
         prog("auth", 10, "authorising with YouTube")
