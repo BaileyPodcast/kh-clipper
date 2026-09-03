@@ -71,9 +71,12 @@ def test_a_failing_callback_never_breaks_the_upload():
     _drain(r, 50)  # would raise on the first bucket if not swallowed
 
 
-def test_upload_band_maps_0_to_100_onto_15_to_80():
-    # The same arithmetic process_youtube_upload's _on_sent uses.
-    band = lambda pct: 15 + int(pct * 0.65)  # noqa: E731
-    assert band(0) == 15
-    assert band(50) == 47
-    assert band(100) == 80
+def test_bar_climbs_from_15_in_steps_of_ten_and_stops_at_95():
+    # Tony (2026-09-04): 15, then every 10 above, 100 is reserved for scheduled.
+    shown = sorted({app.upload_bar_percent(p) for p in range(0, 101)})
+    assert shown == [15, 25, 35, 45, 55, 65, 75, 85, 95]
+    assert app.upload_bar_percent(0) == 15
+    assert app.upload_bar_percent(100) == 95
+    # Monotonic as the file goes up, never a step back.
+    seq = [app.upload_bar_percent(p) for p in range(0, 101)]
+    assert seq == sorted(seq)
