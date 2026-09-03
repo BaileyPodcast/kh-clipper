@@ -659,6 +659,51 @@ def _download_https_stream(url, dst, on_progress=None, chunk=8 * 1024 * 1024):
     return dst
 
 
+def upload_bar_percent(file_pct):
+    """The go-live card's bar during the YouTube transfer (Tony, 2026-09-04): 15 at
+    the start, then 25, 35, ... 95 in steps of ten as the file goes up, never 100
+    (that is the scheduled state's number). Nine equal slices of the file, one per
+    step, so the bar moves at a steady rhythm on any file size. Pure."""
+    pct = max(0, min(100, int(file_pct)))
+    k = min(8, pct * 9 // 100)
+    return 15 + 10 * k
+
+
+class _ProgressReader:
+    """File-like wrapper for a streaming HTTP body that reports bytes sent.
+
+    requests keeps Content-Length (no chunked encoding, which YouTube's resumable
+    PUT rejects) because __len__ answers the size; http.client then pulls the body
+    through read() in blocks, so counting here is counting what left the socket
+    buffer. `on_progress(done, total)` fires at most once per `step` percent so a
+    multi-GB master produces ~20 row patches, not thousands. Pure apart from the
+    callback, so it is unit tested with an in-memory file."""
+
+    def __init__(self, fileobj, total, on_progress, step=5):
+        self._f = fileobj
+        self._total = int(total)
+        self._cb = on_progress
+        self._step = step
+        self._done = 0
+        self._last_bucket = 0  # 0..4% stays silent; the stage already shows 15%
+
+    def __len__(self):
+        return self._total
+
+    def read(self, n=-1):
+        chunk = self._f.read(n)
+        if chunk:
+            self._done += len(chunk)
+            bucket = (self._done * 100 // self._total) // self._step if self._total else 0
+            if bucket != self._last_bucket:
+                self._last_bucket = bucket
+                try:
+                    self._cb(self._done, self._total)
+                except Exception:
+                    pass  # progress is cosmetic; never break the upload
+        return chunk
+
+
 def _drive_file_id(url):
     """Google Drive file id from a Drive link, or None (same regex as process_job)."""
     import re
@@ -1832,19 +1877,33 @@ def process_youtube_upload(payload: dict):
         # Single streaming PUT (requests streams the file object, never loads it into
         # memory). The session URI is persisted first, so a future hardening can add
         # chunked resume on a dropped connection.
+        # Progress (Tony, 2026-09-04): the transfer used to sit at 15% for the whole
+        # PUT, so a multi-GB master looked stuck for the entire upload. The reader
+        # below counts bytes as http.client pulls them; the bar climbs from 15 in
+        # steps of ten (25, 35, ... 95) as the file goes up, then 100 once the video
+        # is scheduled. One row patch per step, so a multi-GB master costs 8.
+        last_shown = [15]
+
+        def _on_sent(done, total):
+            pct = int(done * 100 / total) if total else 0
+            shown = upload_bar_percent(pct)
+            if shown != last_shown[0]:
+                last_shown[0] = shown
+                prog("upload", shown, f"uploading to YouTube ({pct}%)")
+
         with open(src, "rb") as f:
             up = requests.put(
                 session,
                 headers={"Authorization": f"Bearer {token}",
                          "Content-Length": str(size), "Content-Type": "video/*"},
-                data=f, timeout=None,
+                data=_ProgressReader(f, size, _on_sent, step=1), timeout=None,
             )
         if up.status_code >= 300:
             raise RuntimeError(f"upload failed {up.status_code}: {up.text[:300]}")
         video_id = up.json().get("id")
         if not video_id:
             raise RuntimeError("Upload succeeded but YouTube returned no video id.")
-        patch_upload(upload_id, {"state": "processing", "stage": "processing", "progress": 80,
+        patch_upload(upload_id, {"state": "processing", "stage": "processing", "progress": 95,
                                  "video_id": video_id, "quota_units_used": 1600,
                                  "message": "video uploaded, running side calls"})
 
