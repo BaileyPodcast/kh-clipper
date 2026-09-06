@@ -210,6 +210,55 @@ def get_job(job_id):
     return rows[0] if rows else None
 
 
+def get_upload_row(upload_id):
+    """Read the youtube_uploads row this job is about to work on (video_id +
+    state only). Returns None when the read fails for any reason: the caller
+    treats an unreadable row as "no evidence of a prior upload" and proceeds,
+    because refusing on a transient read error would strand a legitimate job."""
+    import requests
+    try:
+        r = requests.get(
+            f"{_sb_url()}/rest/v1/youtube_uploads",
+            headers=_sb_headers({"Accept": "application/json"}),
+            params={"id": f"eq.{upload_id}", "select": "id,video_id,state", "limit": "1"},
+            timeout=30,
+        )
+        if r.status_code >= 300:
+            print(f"get_upload_row {r.status_code}: {r.text[:200]}")
+            return None
+        rows = r.json()
+        return rows[0] if isinstance(rows, list) and rows else None
+    except Exception as e:
+        print(f"get_upload_row failed: {e}")
+        return None
+
+
+def reupload_refusal(row):
+    """The one rule for refusing an upload job: the row already carries a
+    video_id, so a video for this episode exists on the channel and another
+    videos.insert would duplicate it. Pure (tests/test_youtube_upload_refusal.py).
+    Returns the reason to record on the row, or None to proceed."""
+    video_id = (row or {}).get("video_id")
+    if not video_id:
+        return None
+    return (f"refused: this upload already has video {video_id} on the channel, so a "
+            f"second upload would only duplicate it. Clear the video id in Kintsugi Studio "
+            f"if you really mean to upload again.")
+
+
+def refuse_duplicate_upload(upload_id):
+    """Read the row, apply reupload_refusal, and when it refuses record the
+    reason on the row (state=failed) and return True. The row's video_id is
+    never touched. Module-level (not a Modal function) so it is testable
+    without the Modal runtime."""
+    refusal = reupload_refusal(get_upload_row(upload_id))
+    if not refusal:
+        return False
+    patch_upload(upload_id, {"state": "failed", "error": refusal})
+    print(f"process_youtube_upload refused for {upload_id}: {refusal}")
+    return True
+
+
 def patch_upload(upload_id, fields):
     """PATCH a youtube_uploads row (service role bypasses RLS). Never raises.
     `updated_at` is handled by the youtube_uploads_set_updated_at DB trigger."""
@@ -1814,6 +1863,16 @@ def process_youtube_upload(payload: dict):
     def prog(stage, pct, msg=""):
         patch_upload(upload_id, {"state": "uploading", "stage": stage,
                                  "progress": int(pct), "message": msg})
+
+    # Defence in depth against a double trigger (2026-09-07: kh-studio POSTed
+    # the same upload twice, four minutes apart, and two private copies of the
+    # same master landed on the channel). kh-studio now refuses the second click
+    # itself; this catches anything that still gets through. A row that already
+    # carries a video_id has a video on the channel, so a second insert can only
+    # ever be a duplicate. It is refused loudly (state=failed with the reason),
+    # never silently, and the row's video_id is left exactly as it was.
+    if refuse_duplicate_upload(upload_id):
+        return
 
     src = None
     try:
